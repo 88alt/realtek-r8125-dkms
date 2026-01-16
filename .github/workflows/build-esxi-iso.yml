@@ -110,7 +110,6 @@ jobs:
             Write-Host "  - Folder Item ID: $folderItemId"
             Write-Host "  - 文件夹名: $folderName"
             
-            # 输出为步骤输出，供后续步骤使用
             "driveId=$driveId" >> $env:GITHUB_OUTPUT
             "folderItemId=$folderItemId" >> $env:GITHUB_OUTPUT
             "folderName=$folderName" >> $env:GITHUB_OUTPUT
@@ -261,7 +260,7 @@ jobs:
             throw "ISO 创建失败"
         }
 
-    # 步骤四：一体化上传（关键修复步骤）
+    # 步骤四：一体化上传（关键修复步骤） - 已移除403测试代码
     - name: Upload ISO to OneDrive (一体化修复版)
       shell: pwsh
       run: |
@@ -313,7 +312,7 @@ jobs:
             if ($driveItem.folder) {
                 Write-Host "  - 资源类型: 文件夹 ✅"
             } elseif ($driveItem.file) {
-                Write-Host "  - 资源类型: 文件 (可能需要使用父目录ID)"
+                Write-Host "  - 资源类型: 文件"
                 Write-Host "  - 父目录ID: $($driveItem.parentReference.id)"
             }
         } catch {
@@ -355,10 +354,9 @@ jobs:
             Write-Host "  - Token长度: $($uploadToken.Length) 字符"
             Write-Host ""
             
+            # 只验证基本格式，不进行需要额外权限的API测试
             if ($uploadToken -match '^[A-Za-z0-9\-_]+?\.[A-Za-z0-9\-_]+?\.[A-Za-z0-9\-_]+?$') {
                 Write-Host "  - Token格式: JWT格式正确 ✅"
-            } else {
-                Write-Host "  - Token格式: 可能不是标准JWT格式 ⚠️"
             }
         } catch {
             Write-Error "获取上传token失败: $_"
@@ -395,16 +393,6 @@ jobs:
         Write-Host ""
         
         try {
-            Write-Host "正在测试token有效性..."
-            $testUrl = "https://graph.microsoft.com/v1.0/organization"
-            try {
-                $testResponse = Invoke-RestMethod -Uri $testUrl -Headers $headers -Method GET -ErrorAction SilentlyContinue
-                Write-Host "✓ Token测试通过 (可以访问Graph API)"
-            } catch {
-                Write-Host "⚠️ Token测试失败: $($_.Exception.Message)"
-                Write-Host "   可能权限不足，但继续尝试创建上传会话..."
-            }
-            
             Write-Host "正在发送创建会话请求..."
             $session = Invoke-RestMethod -Method POST -Uri $createUrl -Headers $headers -Body $bodyJson
             $uploadUrl = $session.uploadUrl
@@ -492,10 +480,6 @@ jobs:
                 
                 if ($errorBody -like "*Access token is empty*") {
                     Write-Host "❌ 问题诊断: Graph API确实没有收到有效的token"
-                    Write-Host "   可能原因:"
-                    Write-Host "   1. Authorization头格式错误"
-                    Write-Host "   2. Token字符串有问题"
-                    Write-Host "   3. PowerShell变量传递问题"
                 } elseif ($errorBody -like "*insufficient*" -or $errorBody -like "*access denied*") {
                     Write-Host "❌ 问题诊断: 权限不足"
                     Write-Host "   请检查Azure应用注册权限:"
@@ -503,7 +487,6 @@ jobs:
                     Write-Host "   2. 需要管理员同意"
                 } elseif ($errorBody -like "*itemNotFound*") {
                     Write-Host "❌ 问题诊断: 路径或itemId不存在"
-                    Write-Host "   folderItemId可能不是文件夹或已失效"
                 }
             }
             throw
