@@ -8,7 +8,6 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-
     env:
       OD_CLIENT_ID: ${{ secrets.OD_CLIENT_ID }}
       OD_CLIENT_SECRET: ${{ secrets.OD_CLIENT_SECRET }}
@@ -26,117 +25,86 @@ jobs:
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         $OutputEncoding = [System.Text.Encoding]::UTF8
-       
         Write-Host "=== Install Python Modules ==="
         $pythonPath = "C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe"
-       
         Write-Host "Python Path: $pythonPath"
         & $pythonPath --version
-       
-        Write-Host "Installing required modules..."
         & $pythonPath -m pip install --upgrade pip
         & $pythonPath -m pip install six lxml psutil pyopenssl
-       
-        Write-Host "Verifying modules..."
         & $pythonPath -c "import six; import lxml; import psutil; import OpenSSL; print('All Python modules verified successfully')"
-       
         "PYTHON_PATH=$pythonPath" >> $env:GITHUB_ENV
 
     - name: Install VMware PowerCLI
       shell: pwsh
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-       
         Write-Host "=== Install VMware PowerCLI ==="
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-       
-        Write-Host "Installing PowerCLI..."
         Install-Module -Name VMware.PowerCLI -Scope CurrentUser -Force -AllowClobber
-       
-        Write-Host "Verifying installation..."
         Get-Module -ListAvailable VMware.PowerCLI | Select-Object Name, Version
 
     - name: Configure PowerCLI
       shell: pwsh
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-       
         Write-Host "=== Configure PowerCLI ==="
-       
         $pythonPath = $env:PYTHON_PATH
         if (-not $pythonPath) {
             $pythonPath = "C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe"
         }
-       
-        Write-Host "Setting Python Path: $pythonPath"
         Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -PythonPath $pythonPath -Confirm:$false
-       
-        Write-Host "Verifying configuration..."
-        $config = Get-PowerCLIConfiguration
-        Write-Host "PythonPath: $($config.PythonPath)"
-        Write-Host "Configuration completed"
+        Get-PowerCLIConfiguration
 
     - name: Test PowerCLI
       shell: pwsh
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-       
         Write-Host "=== Test PowerCLI ==="
-       
-        Write-Host "Importing ImageBuilder module..."
         Import-Module VMware.ImageBuilder -ErrorAction Stop
         Write-Host "ImageBuilder imported successfully"
-       
-        Write-Host "Testing PowerCLI commands..."
         Get-PowerCLIConfiguration
-        Write-Host "PowerCLI test passed"
 
-    - name: Get Microsoft Graph Access Token and Drive Info
+    # 步骤一：获取驱动信息（只用一次，此token不用于上传）
+    - name: Get Drive and Folder Information
       shell: pwsh
+      id: get_drive_info
       run: |
-        Write-Host "=== 获取访问令牌和驱动信息 ==="
+        Write-Host "=== 获取驱动和文件夹信息 ==="
         
-        # 获取访问令牌
+        # 获取一次性token用于读取信息
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
-        $body = "client_id=$env:OD_CLIENT_ID&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default&client_secret=$env:OD_CLIENT_SECRET&grant_type=client_credentials"
+        $body = @{
+            client_id     = $env:OD_CLIENT_ID
+            scope         = "https://graph.microsoft.com/.default"
+            client_secret = $env:OD_CLIENT_SECRET
+            grant_type    = "client_credentials"
+        }
         
+        Write-Host "正在获取访问令牌..."
         try {
-            $response = Invoke-WebRequest -Uri $tokenUrl -Method POST -ContentType "application/x-www-form-urlencoded" -Body $body
-            $tokenData = $response.Content | ConvertFrom-Json
+            $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
+            $token = $tokenResponse.access_token
             
-            if ($tokenData.access_token -and $tokenData.access_token -match '\.[^\.]+\.[^\.]+') {
-                $token = $tokenData.access_token
-                Write-Host "✓ 访问令牌获取成功"
-                
-                # 保存到临时文件
-                $token | Out-File -FilePath "$env:TEMP\access_token.txt" -Encoding UTF8
-                "ACCESS_TOKEN=$token" >> $env:GITHUB_ENV
-                $env:ACCESS_TOKEN = $token
-            } else {
-                throw "令牌格式无效"
+            if ([string]::IsNullOrEmpty($token)) {
+                throw "获取到的访问令牌为空"
             }
+            Write-Host "✓ 访问令牌获取成功"
         } catch {
-            Write-Host "获取访问令牌失败: $_"
+            Write-Error "获取访问令牌失败: $_"
             throw
         }
         
-        # 获取驱动和文件夹信息
-        Write-Host ""
-        Write-Host "获取驱动和文件夹信息..."
-        
-        # 解析共享链接
+        # 获取驱动信息
+        Write-Host "正在解析共享链接..."
         $encodedLink = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:SHARED_LINK)).TrimEnd("=")
         $shareUrl = "https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
-        
-        Write-Host "共享链接解析URL: $shareUrl"
         
         try {
             $headers = @{ Authorization = "Bearer $token" }
             $driveItem = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
             
-            # ✅ 获取所有必要信息
             $driveId = $driveItem.parentReference.driveId
-            $folderItemId = $driveItem.id  # ⭐⭐⭐ 文件夹的 itemId
+            $folderItemId = $driveItem.id
             $folderName = $driveItem.name
             
             Write-Host "✓ 驱动信息获取成功:"
@@ -144,28 +112,35 @@ jobs:
             Write-Host "  - Folder Item ID: $folderItemId"
             Write-Host "  - 文件夹名: $folderName"
             
-            # 保存到环境变量
-            "DRIVE_ID=$driveId" >> $env:GITHUB_ENV
-            "FOLDER_ITEM_ID=$folderItemId" >> $env:GITHUB_ENV
-            "FOLDER_NAME=$folderName" >> $env:GITHUB_ENV
+            # ✅ 关键：将驱动信息输出为步骤输出，供后续步骤使用
+            "driveId=$driveId" >> $env:GITHUB_OUTPUT
+            "folderItemId=$folderItemId" >> $env:GITHUB_OUTPUT
+            "folderName=$folderName" >> $env:GITHUB_OUTPUT
             
         } catch {
-            Write-Host "获取驱动信息失败: $_"
+            Write-Error "获取驱动信息失败: $_"
             throw
         }
 
+    # 步骤二：下载文件（使用新的token）
     - name: Download ESXi Depot Files
       shell: pwsh
       run: |
         Write-Host "=== 下载 ESXi Depot 文件 ==="
-       
-        $token = $env:ACCESS_TOKEN
-        if ([string]::IsNullOrEmpty($token)) {
-            $tokenFile = "$env:TEMP\access_token.txt"
-            if (Test-Path $tokenFile) {
-                $token = Get-Content -Path $tokenFile -Raw
-            }
+        
+        # ⭐ 每次操作前重新获取token
+        Write-Host "正在获取下载用的访问令牌..."
+        $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
+        $body = @{
+            client_id     = $env:OD_CLIENT_ID
+            scope         = "https://graph.microsoft.com/.default"
+            client_secret = $env:OD_CLIENT_SECRET
+            grant_type    = "client_credentials"
         }
+        
+        $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
+        $token = $tokenResponse.access_token
+        Write-Host "✓ 下载令牌获取成功"
        
         $TEMP_DIR = Join-Path $env:TEMP "depots"
         New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
@@ -183,13 +158,14 @@ jobs:
        
         $headers = @{ Authorization = "Bearer $token" }
         $successCount = 0
+        $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
+        $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
        
         foreach ($file in $files) {
-            $downloadUrl = "https://graph.microsoft.com/v1.0/drives/$($env:DRIVE_ID)/root:/$($env:FOLDER_NAME)/$($file):/content"
+            $downloadUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${folderName}/${file}:/content"
             $outFile = Join-Path $TEMP_DIR $file
            
             Write-Host "下载: $file"
-           
             try {
                 Invoke-RestMethod -Method GET -Uri $downloadUrl -Headers $headers -OutFile $outFile
                
@@ -284,30 +260,36 @@ jobs:
             Write-Host ""
            
             "ISO_PATH=$outIso" >> $env:GITHUB_ENV
-            $env:ISO_PATH = $outIso
         } else {
             throw "ISO 创建失败"
         }
 
-    - name: Upload ISO to OneDrive (使用 itemId 方式)
+    # 步骤三：上传文件（使用全新的token）
+    - name: Upload ISO to OneDrive
       shell: pwsh
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         $OutputEncoding = [System.Text.Encoding]::UTF8
        
-        Write-Host "=== 开始上传 ISO 到 OneDrive (itemId 方式) ==="
+        Write-Host "=== 开始上传 ISO 到 OneDrive ==="
         Write-Host ""
-
-        # 获取访问令牌
-        $token = $env:ACCESS_TOKEN
-        if ([string]::IsNullOrEmpty($token)) {
-            $tokenFile = "$env:TEMP\access_token.txt"
-            if (Test-Path $tokenFile) {
-                $token = Get-Content -Path $tokenFile -Raw
-            }
+        
+        # ⭐ 关键：上传前重新获取全新的token
+        Write-Host "正在获取上传用的访问令牌..."
+        $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
+        $body = @{
+            client_id     = $env:OD_CLIENT_ID
+            scope         = "https://graph.microsoft.com/.default"
+            client_secret = $env:OD_CLIENT_SECRET
+            grant_type    = "client_credentials"
         }
+        
+        $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
+        $token = $tokenResponse.access_token
+        Write-Host "✓ 上传令牌获取成功"
+        
         if ([string]::IsNullOrEmpty($token)) { 
-            throw "没有有效的访问令牌" 
+            throw "无法获取有效的访问令牌" 
         }
 
         # 验证 ISO 文件
@@ -320,29 +302,25 @@ jobs:
         }
 
         $isoName = "ESXi-8.0U3b-24280767-RTL8125BG.iso"
-        $driveId = $env:DRIVE_ID
-        $folderItemId = $env:FOLDER_ITEM_ID
-
+        # 从步骤输出获取驱动信息
+        $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
+        $folderItemId = "${{ steps.get_drive_info.outputs.folderItemId }}"
+        
         # 获取文件信息
         $fileInfo = Get-Item $isoPath
         $fileSize = $fileInfo.Length
         Write-Host "ISO 信息:"
         Write-Host "  - 文件名: $isoName"
-        Write-Host "  - 文件大小: $([math]::Round($fileSize / 1MB, 2)) MB ($fileSize bytes)"
+        Write-Host "  - 文件大小: $([math]::Round($fileSize / 1MB, 2)) MB"
         Write-Host "  - Drive ID: $driveId"
         Write-Host "  - Folder Item ID: $folderItemId"
         Write-Host ""
 
-        # ✅ 关键修复：使用 itemId 方式创建上传会话
-        Write-Host "正在创建上传会话 (使用 itemId 方式)..."
-        
-        # ✅ 修复：使用 ${} 包裹变量名，因为后面有冒号 :
+        # 使用 itemId 方式创建上传会话
+        Write-Host "正在创建上传会话..."
         $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/items/${folderItemId}:/${isoName}:/createUploadSession"
+        Write-Host "创建会话 URL: $createUrl"
         
-        Write-Host "创建会话 URL:"
-        Write-Host "  $createUrl"
-        Write-Host ""
-
         $headers = @{
             Authorization = "Bearer $token"
             "Content-Type" = "application/json"
@@ -359,10 +337,6 @@ jobs:
             $uploadUrl = $session.uploadUrl
             Write-Host "✓ 上传会话创建成功"
             Write-Host "  - 会话 URL: $($uploadUrl.Substring(0, 80))..."
-            
-            # 保存到临时文件供后续使用
-            $uploadUrl | Out-File -FilePath "$env:TEMP\upload_session.txt" -Encoding UTF8
-            
         } catch {
             Write-Error "创建上传会话失败: $($_.Exception.Message)"
             if ($_.Exception.Response) {
@@ -375,18 +349,12 @@ jobs:
             throw
         }
 
-        # 从临时文件读取上传会话URL
-        $uploadUrl = Get-Content -Path "$env:TEMP\upload_session.txt" -Raw
-        if ([string]::IsNullOrEmpty($uploadUrl)) {
-            throw "未找到上传会话URL"
-        }
-
-        # 分片上传配置
-        $chunkSize = 3276800  # 3.125 MB，320KB 的倍数 (Graph API 推荐)
-        $fileStream = $null
+        # 分片上传
+        $chunkSize = 3276800
+        $fileStream = [System.IO.File]::OpenRead($isoPath)
         $totalChunks = [math]::Ceiling($fileSize / $chunkSize)
-        $currentChunk = 1
         $bytesUploaded = 0
+        $chunkNumber = 1
 
         Write-Host ""
         Write-Host "开始分片上传..."
@@ -394,116 +362,56 @@ jobs:
         Write-Host "  - 总块数: $totalChunks"
         Write-Host ""
 
-        try {
-            # 打开文件流
-            $fileStream = [System.IO.File]::OpenRead($isoPath)
-            
-            # 分片上传循环
-            while ($true) {
-                # 读取分片数据
-                $buffer = New-Object byte[] $chunkSize
-                $bytesRead = $fileStream.Read($buffer, 0, $chunkSize)
-                
-                if ($bytesRead -eq 0) {
-                    Write-Host "✓ 文件读取完成"
+        for ($i=0; $i -lt $totalChunks; $i++) {
+            $buffer = New-Object byte[] $chunkSize
+            $bytesRead = $fileStream.Read($buffer, 0, $chunkSize)
+            $rangeStart = $bytesUploaded
+            $rangeEnd = $bytesUploaded + $bytesRead - 1
+            $rangeHeader = "bytes $rangeStart-$rangeEnd/$fileSize"
+
+            $retry = 0
+            do {
+                try {
+                    $req = [System.Net.HttpWebRequest]::Create($uploadUrl)
+                    $req.Method = "PUT"
+                    $req.ContentType = "application/octet-stream"
+                    $req.ContentLength = $bytesRead
+                    $req.Headers.Add("Content-Range", $rangeHeader)
+                    $stream = $req.GetRequestStream()
+                    $stream.Write($buffer, 0, $bytesRead)
+                    $stream.Close()
+                    $resp = $req.GetResponse()
+                    $resp.Close()
+                    Write-Host "分片 [$chunkNumber/$totalChunks]: ✓ 成功 (进度: $([math]::Round(($rangeEnd+1)/$fileSize*100, 2))%)"
                     break
-                }
-
-                # 计算当前分片范围
-                $rangeStart = $bytesUploaded
-                $rangeEnd = $bytesUploaded + $bytesRead - 1
-                $rangeHeader = "bytes $rangeStart-$rangeEnd/$fileSize"
-
-                Write-Host "上传分片 [$currentChunk/$totalChunks]:"
-                Write-Host "  - 范围: $rangeHeader"
-                Write-Host "  - 实际读取: $bytesRead bytes"
-                Write-Host "  - 进度: $([math]::Round(($rangeEnd + 1) / $fileSize * 100, 2))%"
-
-                # 使用 HttpWebRequest 上传
-                $retryCount = 0
-                $maxRetries = 3
-                $uploadSuccess = $false
-
-                do {
-                    try {
-                        # 创建 HttpWebRequest
-                        $request = [System.Net.HttpWebRequest]::Create($uploadUrl)
-                        $request.Method = "PUT"
-                        $request.ContentType = "application/octet-stream"
-                        $request.ContentLength = $bytesRead
-                        $request.Headers.Add("Content-Range", $rangeHeader)
-                        
-                        # 获取请求流并写入数据
-                        $reqStream = $request.GetRequestStream()
-                        $reqStream.Write($buffer, 0, $bytesRead)
-                        $reqStream.Close()
-                        
-                        # 获取响应
-                        $response = $request.GetResponse()
-                        $statusCode = [int]$response.StatusCode
-                        $response.Close()
-                        
-                        $uploadSuccess = $true
-                        Write-Host "  - 状态: ✓ 成功 (HTTP $statusCode)"
-                        Write-Host ""
-                        
-                    } catch {
-                        $retryCount++
-                        if ($retryCount -ge $maxRetries) {
-                            Write-Host "  - 状态: ✗ 失败 (尝试 $maxRetries 次后仍然失败)"
-                            Write-Host "  - 错误: $($_.Exception.Message)"
-                            
-                            # 获取详细错误信息
-                            if ($_.Exception.Response) {
-                                $errorStatusCode = $_.Exception.Response.StatusCode
-                                $errorDescription = $_.Exception.Response.StatusDescription
-                                Write-Host "  - HTTP 状态: $errorStatusCode $errorDescription"
-                            }
-                            
-                            throw "分片上传失败: $rangeHeader"
-                        } else {
-                            Write-Host "  - 状态: ⚠️ 重试 $retryCount/$maxRetries (等待 5 秒...)"
-                            Start-Sleep -Seconds 5
-                        }
+                } catch {
+                    $retry++
+                    if ($retry -ge 3) { 
+                        Write-Host "分片 [$chunkNumber/$totalChunks]: ✗ 失败 - $rangeHeader"
+                        throw "分片上传失败: $rangeHeader" 
                     }
-                } while (-not $uploadSuccess -and $retryCount -lt $maxRetries)
-
-                # 更新进度
-                $bytesUploaded += $bytesRead
-                $currentChunk++
-                
-                # 处理可能的网络延迟
-                if ($currentChunk % 10 -eq 0) {
-                    Start-Sleep -Milliseconds 500
+                    Write-Host "分片 [$chunkNumber/$totalChunks]: ⚠️ 重试 $retry/3 (等待 5 秒...)"
+                    Start-Sleep -Seconds 5
                 }
-            }
+            } while ($retry -lt 3)
 
-            # 上传完成
-            Write-Host ""
-            Write-Host "========================================"
-            Write-Host "上传完成!"
-            Write-Host "  - 文件: $isoName"
-            Write-Host "  - 大小: $([math]::Round($fileSize / 1MB, 2)) MB"
-            Write-Host "  - 总块数: $($currentChunk - 1)"
-            Write-Host "  - 目标位置: OneDrive 文件夹"
-            Write-Host "========================================"
-
-        } catch {
-            Write-Error "上传过程中发生错误: $($_.Exception.Message)"
-            Write-Host ""
-            Write-Host "当前状态:"
-            Write-Host "  - 已上传: $([math]::Round($bytesUploaded / 1MB, 2)) MB / $([math]::Round($fileSize / 1MB, 2)) MB"
-            Write-Host "  - 进度: $([math]::Round($bytesUploaded / $fileSize * 100, 2))%"
+            $bytesUploaded += $bytesRead
+            $chunkNumber++
             
-            throw
-        } finally {
-            # 确保文件流关闭
-            if ($fileStream) {
-                $fileStream.Close()
-                $fileStream.Dispose()
-                Write-Host "文件流已关闭"
+            # 避免发送过快
+            if ($chunkNumber % 10 -eq 0) {
+                Start-Sleep -Milliseconds 500
             }
         }
+
+        $fileStream.Close()
+        Write-Host ""
+        Write-Host "========================================"
+        Write-Host "上传完成!"
+        Write-Host "  - 文件: $isoName"
+        Write-Host "  - 大小: $([math]::Round($fileSize / 1MB, 2)) MB"
+        Write-Host "  - 总块数: $totalChunks"
+        Write-Host "========================================"
 
     - name: Check ISO file exists before artifact upload
       shell: pwsh
@@ -511,12 +419,10 @@ jobs:
       run: |
         Write-Host "=== 检查ISO文件是否存在 ==="
         
-        # 尝试多个可能的路径
         $possiblePaths = @(
-            "$env:ISO_PATH",  # 环境变量中的路径
+            "$env:ISO_PATH",
             "$env:TEMP\depots\ESXi-8.0U3b-24280767-RTL8125BG.iso",
-            "$env:RUNNER_TEMP\depots\ESXi-8.0U3b-24280767-RTL8125BG.iso",
-            "D:\a\_temp\depots\ESXi-8.0U3b-24280767-RTL8125BG.iso"
+            "$env:RUNNER_TEMP\depots\ESXi-8.0U3b-24280767-RTL8125BG.iso"
         )
         
         $foundPath = $null
@@ -530,24 +436,20 @@ jobs:
         }
         
         if ($foundPath) {
-            # 输出文件路径供后续步骤使用
             "artifact_path=$foundPath" >> $env:GITHUB_OUTPUT
         } else {
             Write-Host "⚠️ ISO文件不存在，将跳过Artifact上传"
-            Write-Host "OneDrive上传已成功完成，文件已安全存储"
         }
 
     - name: Upload to GitHub Artifacts (Conditional)
       if: steps.check-artifact.outputs.artifact_path != ''
       uses: actions/upload-artifact@v4
-      id: upload-artifact
       with:
         name: ESXi-8.0U3b-RTL8125BG-ISO
         path: ${{ steps.check-artifact.outputs.artifact_path }}
         retention-days: 7
         if-no-files-found: ignore
 
-    # 新增步骤：显示Artifact下载链接
     - name: Display Artifact Download Link
       if: steps.upload-artifact.outputs.artifact-id != ''
       shell: pwsh
@@ -557,11 +459,4 @@ jobs:
         Write-Host "✅ GitHub Artifact 上传完成！"
         Write-Host "📦 Artifact 名称: ESXi-8.0U3b-RTL8125BG-ISO"
         Write-Host "🔗 下载链接可在 GitHub Actions 页面查看"
-        Write-Host ""
-        Write-Host "下载方式:"
-        Write-Host "1. 前往此工作流的 Summary 页面"
-        Write-Host "2. 在 'Artifacts' 部分找到 'ESXi-8.0U3b-RTL8125BG-ISO'"
-        Write-Host "3. 点击下载按钮获取 ISO 文件"
-        Write-Host "4. 文件将在 7 天后自动删除"
         Write-Host "========================================"
-        Write-Host ""
