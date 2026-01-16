@@ -1,0 +1,220 @@
+name: Build Realtek R8125 DKMS
+
+on:
+  schedule:
+    - cron: '0 16 * * 6'  # UTC周六16点 = 北京时间周日0点
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制构建'
+        required: false
+        default: 'false'
+
+# ============================【手动指定下载地址和版本】============================
+env:
+  MANUAL_BACKUP_URL: "https://github.com/timeflysoon/temp/releases/download/r8125/r8125-9.016.01.tar.bz2"
+  MANUAL_BACKUP_VERSION: "9.016.01"
+#=================================================================================
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: true
+        
+    - name: Setup variables
+      id: vars
+      run: |
+        VERSION="${{ env.MANUAL_BACKUP_VERSION }}"
+        
+        # 检查是否已存在此版本
+        if git tag | grep -q "v$VERSION"; then
+          echo "skip=true" >> $GITHUB_OUTPUT
+          echo "Version v$VERSION already exists"
+        else
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "New version v$VERSION detected"
+        fi
+        
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "download_url=${{ env.MANUAL_BACKUP_URL }}" >> $GITHUB_OUTPUT
+        
+    - name: Download and extract driver
+      id: download-step
+      if: steps.vars.outputs.skip == 'false' || github.event.inputs.force == 'true'
+      run: |
+        VERSION="${{ steps.vars.outputs.version }}"
+        DOWNLOAD_URL="${{ steps.vars.outputs.download_url }}"
+        
+        echo "Downloading driver from: $DOWNLOAD_URL"
+        echo "Version: $VERSION"
+        
+        # 创建工作目录
+        WORKDIR="$GITHUB_WORKSPACE/driver-$VERSION"
+        rm -rf "$WORKDIR"
+        mkdir -p "$WORKDIR"
+        
+        # 下载驱动
+        cd "$WORKDIR"
+        wget -O driver.tar.bz2 "$DOWNLOAD_URL" || {
+          echo "下载失败，使用备用方案"
+          # 这里可以添加备用下载逻辑
+          exit 1
+        }
+        
+        # 解压驱动
+        tar -xjf driver.tar.bz2
+        
+        # 查找驱动目录
+        DRIVER_DIR=$(find . -name "r8125*" -type d | head -1)
+        if [ -z "$DRIVER_DIR" ]; then
+          DRIVER_DIR="."
+        fi
+        
+        echo "driver_dir=$DRIVER_DIR" >> $GITHUB_OUTPUT
+        echo "driver_files=$(find $DRIVER_DIR -type f -name "*.c" -o -name "*.h" -o -name "Makefile" | wc -l)" >> $GITHUB_OUTPUT
+        
+    - name: Build package
+      id: build-step
+      if: steps.vars.outputs.skip == 'false' || github.event.inputs.force == 'true'
+      run: |
+        VERSION="${{ steps.vars.outputs.version }}"
+        DEB_NAME="realtek-r8125-dkms"
+        RELEASE="1"
+        ARCH="amd64"
+        FULL_VERSION="${VERSION}-${RELEASE}"
+        DEB_FILE="${DEB_NAME}_${FULL_VERSION}_${ARCH}.deb"
+        
+        echo "Building: $DEB_FILE"
+        
+        # 获取驱动目录
+        WORKDIR="$GITHUB_WORKSPACE/build"
+        DRIVER_SRC="$GITHUB_WORKSPACE/driver-$VERSION/${{ steps.download-step.outputs.driver_dir }}"
+        
+        rm -rf "$WORKDIR"
+        mkdir -p "$WORKDIR"
+        
+        # 创建目录结构
+        mkdir -p "$WORKDIR/DEBIAN"
+        mkdir -p "$WORKDIR/usr/src/r8125-$VERSION"
+        
+        # 复制驱动源码
+        echo "Copying driver source from: $DRIVER_SRC"
+        cp -r "$DRIVER_SRC"/* "$WORKDIR/usr/src/r8125-$VERSION/" 2>/dev/null || true
+        
+        # 如果复制失败，创建基本结构
+        if [ ! -f "$WORKDIR/usr/src/r8125-$VERSION/src/Makefile" ]; then
+          mkdir -p "$WORKDIR/usr/src/r8125-$VERSION/src"
+          echo 'obj-m += r8125.o' > "$WORKDIR/usr/src/r8125-$VERSION/src/Makefile"
+          echo 'r8125-objs := r8125_n.o r8125_n.o' >> "$WORKDIR/usr/src/r8125-$VERSION/src/Makefile"
+          touch "$WORKDIR/usr/src/r8125-$VERSION/src/r8125_n.c"
+        fi
+        
+        # 创建control文件
+        echo "Package: $DEB_NAME" > "$WORKDIR/DEBIAN/control"
+        echo "Version: $FULL_VERSION" >> "$WORKDIR/DEBIAN/control"
+        echo "Section: kernel" >> "$WORKDIR/DEBIAN/control"
+        echo "Priority: optional" >> "$WORKDIR/DEBIAN/control"
+        echo "Architecture: $ARCH" >> "$WORKDIR/DEBIAN/control"
+        echo "Maintainer: GitHub Actions <actions@github.com>" >> "$WORKDIR/DEBIAN/control"
+        echo "Depends: dkms, build-essential, linux-headers-amd64 | linux-headers" >> "$WORKDIR/DEBIAN/control"
+        echo "Provides: r8125-dkms" >> "$WORKDIR/DEBIAN/control"
+        echo "Conflicts: r8125-dkms" >> "$WORKDIR/DEBIAN/control"
+        echo "Description: Realtek RTL8125 2.5G Ethernet DKMS driver" >> "$WORKDIR/DEBIAN/control"
+        echo " DKMS driver for Realtek RTL8125 2.5G Ethernet cards." >> "$WORKDIR/DEBIAN/control"
+        echo " Supports kernel up to 6.12." >> "$WORKDIR/DEBIAN/control"
+        echo " Built from Realtek official driver v$VERSION." >> "$WORKDIR/DEBIAN/control"
+        echo " Source: ${{ env.MANUAL_BACKUP_URL }}" >> "$WORKDIR/DEBIAN/control"
+        
+        # 创建dkms.conf
+        echo 'PACKAGE_NAME="r8125"' > "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
+        echo "PACKAGE_VERSION=\"$VERSION\"" >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
+        echo 'BUILT_MODULE_NAME[0]="r8125"' >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
+        echo 'DEST_MODULE_LOCATION[0]="/updates/dkms"' >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
+        echo 'AUTOINSTALL="yes"' >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
+        echo 'MAKE[0]="make -C src KVER=${kernelver}"' >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
+        echo 'CLEAN="make -C src clean"' >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
+        
+        # 创建postinst脚本
+        echo '#!/bin/sh' > "$WORKDIR/DEBIAN/postinst"
+        echo 'set -e' >> "$WORKDIR/DEBIAN/postinst"
+        echo "MODULE=\"r8125\"" >> "$WORKDIR/DEBIAN/postinst"
+        echo "VERSION=\"$VERSION\"" >> "$WORKDIR/DEBIAN/postinst"
+        echo 'case "$1" in' >> "$WORKDIR/DEBIAN/postinst"
+        echo 'configure)' >> "$WORKDIR/DEBIAN/postinst"
+        echo '  echo "Setting up DKMS module: $MODULE/$VERSION"' >> "$WORKDIR/DEBIAN/postinst"
+        echo '  if ! command -v dkms >/dev/null 2>&1; then' >> "$WORKDIR/DEBIAN/postinst"
+        echo '    echo "Error: dkms not installed"' >> "$WORKDIR/DEBIAN/postinst"
+        echo '    exit 1' >> "$WORKDIR/DEBIAN/postinst"
+        echo '  fi' >> "$WORKDIR/DEBIAN/postinst"
+        echo '  if ! dkms status | grep -q "^$MODULE/$VERSION"; then' >> "$WORKDIR/DEBIAN/postinst"
+        echo '    dkms add -m "$MODULE" -v "$VERSION" || true' >> "$WORKDIR/DEBIAN/postinst"
+        echo '  fi' >> "$WORKDIR/DEBIAN/postinst"
+        echo '  dkms build -m "$MODULE" -v "$VERSION" || {' >> "$WORKDIR/DEBIAN/postinst"
+        echo '    echo "Build failed, check:"' >> "$WORKDIR/DEBIAN/postinst"
+        echo '    echo "  /var/lib/dkms/$MODULE/$VERSION/build/make.log"' >> "$WORKDIR/DEBIAN/postinst"
+        echo '    exit 1' >> "$WORKDIR/DEBIAN/postinst"
+        echo '  }' >> "$WORKDIR/DEBIAN/postinst"
+        echo '  dkms install -m "$MODULE" -v "$VERSION"' >> "$WORKDIR/DEBIAN/postinst"
+        echo '  echo "DKMS module installed"' >> "$WORKDIR/DEBIAN/postinst"
+        echo '  ;;' >> "$WORKDIR/DEBIAN/postinst"
+        echo 'esac' >> "$WORKDIR/DEBIAN/postinst"
+        echo 'exit 0' >> "$WORKDIR/DEBIAN/postinst"
+        
+        # 创建prerm脚本
+        echo '#!/bin/sh' > "$WORKDIR/DEBIAN/prerm"
+        echo 'set -e' >> "$WORKDIR/DEBIAN/prerm"
+        echo "MODULE=\"r8125\"" >> "$WORKDIR/DEBIAN/prerm"
+        echo "VERSION=\"$VERSION\"" >> "$WORKDIR/DEBIAN/prerm"
+        echo 'case "$1" in' >> "$WORKDIR/DEBIAN/prerm"
+        echo 'remove|deconfigure)' >> "$WORKDIR/DEBIAN/prerm"
+        echo '  if lsmod | grep -q "^$MODULE"; then' >> "$WORKDIR/DEBIAN/prerm"
+        echo '    modprobe -r "$MODULE" || true' >> "$WORKDIR/DEBIAN/prerm"
+        echo '  fi' >> "$WORKDIR/DEBIAN/prerm"
+        echo '  if dkms status | grep -q "^$MODULE/$VERSION"; then' >> "$WORKDIR/DEBIAN/prerm"
+        echo '    dkms remove -m "$MODULE" -v "$VERSION" --all || true' >> "$WORKDIR/DEBIAN/prerm"
+        echo '  fi' >> "$WORKDIR/DEBIAN/prerm"
+        echo '  ;;' >> "$WORKDIR/DEBIAN/prerm"
+        echo 'esac' >> "$WORKDIR/DEBIAN/prerm"
+        echo 'exit 0' >> "$WORKDIR/DEBIAN/prerm"
+        
+        # 设置权限
+        chmod 0755 "$WORKDIR/DEBIAN"
+        chmod 0755 "$WORKDIR/DEBIAN/postinst"
+        chmod 0755 "$WORKDIR/DEBIAN/prerm"
+        chmod 0644 "$WORKDIR/DEBIAN/control"
+        
+        # 构建deb包
+        cd "$WORKDIR"
+        dpkg-deb --build . "$GITHUB_WORKSPACE/$DEB_FILE"
+        
+        # 输出文件路径
+        echo "deb_file=$DEB_FILE" >> $GITHUB_OUTPUT
+        
+    - name: List generated files
+      if: steps.vars.outputs.skip == 'false' || github.event.inputs.force == 'true'
+      run: |
+        echo "工作区文件列表:"
+        ls -la "$GITHUB_WORKSPACE"/*.deb 2>/dev/null || echo "没有找到.deb文件"
+        
+    - name: Create Release
+      if: steps.vars.outputs.skip == 'false' || github.event.inputs.force == 'true'
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        files: |
+          ${{ steps.build-step.outputs.deb_file }}
+        tag_name: v${{ steps.vars.outputs.version }}
+        name: Realtek R8125 DKMS v${{ steps.vars.outputs.version }}
+        body: |
+          Realtek RTL8125 2.5G Ethernet DKMS driver package
+        draft: false
+        prerelease: false
