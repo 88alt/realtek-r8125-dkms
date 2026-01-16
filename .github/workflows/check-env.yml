@@ -1,0 +1,373 @@
+name: 环境检查报告
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: '检查的Python版本'
+        required: false
+        default: '3.12'
+        type: choice
+        options:
+          - '3.9'
+          - '3.10'
+          - '3.11'
+          - '3.12'
+          - '3.13'
+
+jobs:
+  generate-report:
+    name: 生成环境检查报告
+    runs-on: windows-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: 检查环境并生成报告
+        id: check-env
+        shell: pwsh
+        run: |
+          # ============================================
+          # 初始化
+          # ============================================
+          $startTime = Get-Date
+          $expectedPythonVersion = "$env:INPUT_PYTHON_VERSION"
+          
+          # 存储检查结果
+          $results = @{}
+          
+          # ============================================
+          # 1. Python 检查
+          # ============================================
+          Write-Host "1、Python 版本检查"
+          Write-Host "────────────────────"
+          
+          $pythonResult = @{状态="❌ 未安装"; 版本=""; 路径=""}
+          
+          # 检查常见的Python路径
+          $pythonPaths = @(
+              "C:\hostedtoolcache\windows\Python\$expectedPythonVersion.*\x64\python.exe",
+              "C:\hostedtoolcache\windows\Python\*\x64\python.exe",
+              "C:\Python*\python.exe"
+          )
+          
+          $foundPython = $null
+          foreach ($pattern in $pythonPaths) {
+              $paths = Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue
+              if ($paths) {
+                  $foundPython = $paths[0].FullName
+                  break
+              }
+          }
+          
+          # 如果没找到，尝试命令查找
+          if (-not $foundPython) {
+              $commands = @("python", "python3", "py")
+              foreach ($cmd in $commands) {
+                  $found = Get-Command $cmd -ErrorAction SilentlyContinue
+                  if ($found) {
+                      $foundPython = $found.Source
+                      break
+                  }
+              }
+          }
+          
+          if ($foundPython -and (Test-Path $foundPython)) {
+              try {
+                  $versionOutput = & $foundPython --version 2>&1
+                  $actualVersion = ($versionOutput | Out-String).Trim()
+                  
+                  if ($actualVersion -match "Python (\d+\.\d+\.\d+)") {
+                      $fullVersion = $Matches[1]
+                      if ($fullVersion -match "^$expectedPythonVersion\.\d+") {
+                          $pythonResult.状态 = "✅ 已预装"
+                      } else {
+                          $pythonResult.状态 = "⚠ 版本不匹配"
+                      }
+                      $pythonResult.版本 = $fullVersion
+                  } else {
+                      $pythonResult.状态 = "⚠ 版本获取失败"
+                      $pythonResult.版本 = $actualVersion
+                  }
+                  $pythonResult.路径 = $foundPython
+                  
+              } catch {
+                  $pythonResult.状态 = "❌ 版本检查失败"
+                  $pythonResult.路径 = $foundPython
+              }
+          }
+          
+          Write-Host "   $($pythonResult.状态)"
+          if ($pythonResult.版本) {
+              Write-Host "   版本: $($pythonResult.版本)"
+          }
+          if ($pythonResult.路径) {
+              Write-Host "   位置在: $($pythonResult.路径)"
+          }
+          Write-Host ""
+          
+          # ============================================
+          # 2. Python 模块检查
+          # ============================================
+          Write-Host "2、Python模块检查"
+          Write-Host "────────────────"
+          
+          $modules = @("six", "lxml", "psutil", "OpenSSL")
+          $moduleResults = @{}
+          $installedCount = 0
+          
+          if ($foundPython -and $pythonResult.状态 -notmatch "❌") {
+              foreach ($module in $modules) {
+                  try {
+                      $result = & $foundPython -c "import $module" 2>$null
+                      if ($LASTEXITCODE -eq 0) {
+                          $moduleResults.$module = "✅ 已安装"
+                          $installedCount++
+                      } else {
+                          $moduleResults.$module = "❌ 缺失"
+                      }
+                  } catch {
+                      $moduleResults.$module = "⚠ 检查失败"
+                  }
+              }
+              
+              if ($installedCount -eq $modules.Count) {
+                  Write-Host "   ✅ 全部已安装: $($modules -join '、')"
+              } elseif ($installedCount -eq 0) {
+                  Write-Host "   ❌ 全部缺失: $($modules -join '、')"
+              } else {
+                  Write-Host "   ⚠ 部分缺失 ($installedCount/$($modules.Count))"
+                  foreach ($module in $modules) {
+                      Write-Host "   $($moduleResults.$module) $module"
+                  }
+              }
+          } else {
+              Write-Host "   ❌ Python未安装，无法检查模块"
+              foreach ($module in $modules) {
+                  $moduleResults.$module = "❌ 无法检查"
+              }
+          }
+          Write-Host ""
+          
+          # ============================================
+          # 3. VMware.PowerCLI 检查
+          # ============================================
+          Write-Host "3、VMware.PowerCLI"
+          Write-Host "──────────────────"
+          
+          $powerCLIResult = "❌ 未安装"
+          $powerCLIVersion = ""
+          
+          $powerCLIModules = Get-Module -ListAvailable -Name "VMware.PowerCLI" | Sort-Object Version -Descending
+          if ($powerCLIModules) {
+              $powerCLIResult = "✅ 已安装"
+              $powerCLIVersion = $powerCLIModules[0].Version.ToString()
+          }
+          
+          Write-Host "   $powerCLIResult"
+          if ($powerCLIVersion) {
+              Write-Host "   版本: $powerCLIVersion"
+          }
+          Write-Host ""
+          
+          # ============================================
+          # 4. VMware.ImageBuilder 检查
+          # ============================================
+          Write-Host "4、VMware.ImageBuilder"
+          Write-Host "──────────────────────"
+          
+          $imageBuilderResult = "❌ 未安装"
+          $imageBuilderVersion = ""
+          
+          $imageBuilderModules = Get-Module -ListAvailable -Name "VMware.ImageBuilder" | Sort-Object Version -Descending
+          if ($imageBuilderModules) {
+              $imageBuilderResult = "✅ 已安装"
+              $imageBuilderVersion = $imageBuilderModules[0].Version.ToString()
+          }
+          
+          Write-Host "   $imageBuilderResult"
+          if ($imageBuilderVersion) {
+              Write-Host "   版本: $imageBuilderVersion"
+          }
+          Write-Host ""
+          
+          # ============================================
+          # 5. PowerShellGet 检查
+          # ============================================
+          Write-Host "5、PowerShellGet"
+          Write-Host "────────────────"
+          
+          $psGetResult = "❌ 未安装"
+          $psGetVersion = ""
+          
+          $psGetModules = Get-Module -ListAvailable -Name "PowerShellGet" | Sort-Object Version -Descending
+          if ($psGetModules) {
+              $psGetResult = "✅ 已安装"
+              $psGetVersion = $psGetModules[0].Version.ToString()
+          }
+          
+          Write-Host "   $psGetResult"
+          if ($psGetVersion) {
+              Write-Host "   版本: $psGetVersion"
+          }
+          Write-Host ""
+          
+          # ============================================
+          # 6. 系统资源检查
+          # ============================================
+          Write-Host "6、系统资源检查"
+          Write-Host "────────────────"
+          
+          $systemResult = "✅ 已检查"
+          $systemDetails = @{}
+          
+          try {
+              # 操作系统信息
+              $os = Get-CimInstance Win32_OperatingSystem
+              $cpu = Get-CimInstance Win32_Processor
+              
+              $systemDetails.操作系统 = $os.Caption
+              $systemDetails.架构 = if ($os.OSArchitecture -eq "64-bit") { "64-bit" } else { $os.OSArchitecture }
+              $systemDetails.处理器 = $cpu.Name.Trim()
+              $systemDetails.核心数 = $cpu.NumberOfCores
+              
+              # 内存信息
+              $mem = Get-CimInstance Win32_OperatingSystem
+              $totalMemGB = [math]::Round($mem.TotalVisibleMemorySize / 1MB, 2)
+              $freeMemGB = [math]::Round($mem.FreePhysicalMemory / 1MB, 2)
+              $usedMemGB = $totalMemGB - $freeMemGB
+              $memUsagePercent = [math]::Round(($usedMemGB / $totalMemGB) * 100, 2)
+              
+              $systemDetails.内存 = @{
+                  总量 = "$totalMemGB GB"
+                  使用率 = "$memUsagePercent%"
+                  可用 = "$freeMemGB GB"
+              }
+              
+              # 磁盘信息
+              $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"
+              $systemDetails.磁盘分区数 = $drives.Count
+              
+              Write-Host "   $systemResult"
+              Write-Host "   内存: 总量 $($systemDetails.内存.总量)，使用率 $($systemDetails.内存.使用率)，可用 $($systemDetails.内存.可用)"
+              Write-Host "   磁盘分区数: $($systemDetails.磁盘分区数)"
+              Write-Host "   操作系统: $($systemDetails.操作系统)"
+              Write-Host "   架构: $($systemDetails.架构)"
+              Write-Host "   核心数: $($systemDetails.核心数)"
+              Write-Host "   处理器: $($systemDetails.处理器)"
+              
+          } catch {
+              $systemResult = "⚠ 检查失败"
+              Write-Host "   $systemResult"
+              Write-Host "   错误: $($_.Exception.Message)"
+          }
+          Write-Host ""
+          
+          # ============================================
+          # 保存检查结果
+          # ============================================
+          $endTime = Get-Date
+          $executionTime = [math]::Round(($endTime - $startTime).TotalSeconds, 2)
+          
+          $results = @{
+              检查时间 = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+              执行时间 = "$executionTime 秒"
+              Python = $pythonResult
+              Python模块 = $moduleResults
+              VMware_PowerCLI = @{状态=$powerCLIResult; 版本=$powerCLIVersion}
+              VMware_ImageBuilder = @{状态=$imageBuilderResult; 版本=$imageBuilderVersion}
+              PowerShellGet = @{状态=$psGetResult; 版本=$psGetVersion}
+              系统资源 = $systemDetails
+          }
+          
+          # 保存为JSON文件
+          $results | ConvertTo-Json -Depth 4 | Out-File -FilePath "环境检查报告.json" -Encoding UTF8
+          
+          # 生成文本格式的报告
+          $textReportLines = @()
+          $textReportLines += "==========================================="
+          $textReportLines += "环境检查报告"
+          $textReportLines += "生成时间: $($results.检查时间)"
+          $textReportLines += "执行耗时: $($results.执行时间)"
+          $textReportLines += "==========================================="
+          $textReportLines += ""
+          $textReportLines += "1、Python $($pythonResult.版本) $($pythonResult.状态)"
+          $textReportLines += "位置在: $($pythonResult.路径)"
+          $textReportLines += ""
+          
+          if ($installedCount -eq $modules.Count) {
+              $textReportLines += "2、Python模块 ✅ 全部已安装: $($modules -join '、')"
+          } elseif ($installedCount -eq 0) {
+              $textReportLines += "2、Python模块 ❌ 全部缺失: $($modules -join '、')"
+          } else {
+              $textReportLines += "2、Python模块 ⚠ 部分缺失 ($installedCount/$($modules.Count)): $($modules -join '、')"
+          }
+          $textReportLines += ""
+          
+          $textReportLines += "3、VMware.PowerCLI $powerCLIResult" + $(if($powerCLIVersion){' ('+$powerCLIVersion+')'})
+          $textReportLines += ""
+          
+          $textReportLines += "4、VMware.ImageBuilder $imageBuilderResult" + $(if($imageBuilderVersion){' ('+$imageBuilderVersion+')'})
+          $textReportLines += ""
+          
+          $textReportLines += "5、PowerShellGet $psGetResult" + $(if($psGetVersion){' ('+$psGetVersion+')'})
+          $textReportLines += ""
+          
+          $textReportLines += "6、系统资源 $systemResult"
+          $textReportLines += "内存: 总量 $($systemDetails.内存.总量)，使用率 $($systemDetails.内存.使用率)，可用 $($systemDetails.内存.可用)"
+          $textReportLines += "磁盘分区数: $($systemDetails.磁盘分区数)"
+          $textReportLines += "操作系统: $($systemDetails.操作系统)"
+          $textReportLines += "架构: $($systemDetails.架构)"
+          $textReportLines += "核心数: $($systemDetails.核心数)"
+          $textReportLines += "处理器: $($systemDetails.处理器)"
+          $textReportLines += ""
+          $textReportLines += "==========================================="
+          $textReportLines += "检查完成"
+          $textReportLines += "==========================================="
+          
+          $textReport = $textReportLines -join "`r`n"
+          $textReport | Out-File -FilePath "环境检查报告.txt" -Encoding UTF8
+          
+          # 在控制台显示文本报告
+          Write-Host $textReport
+          
+          # 输出变量
+          echo "python_status=$($pythonResult.状态)" >> $env:GITHUB_OUTPUT
+          echo "python_version=$($pythonResult.版本)" >> $env:GITHUB_OUTPUT
+          echo "python_modules_installed=$installedCount" >> $env:GITHUB_OUTPUT
+          echo "powercli_status=$powerCLIResult" >> $env:GITHUB_OUTPUT
+          echo "execution_time=$executionTime" >> $env:GITHUB_OUTPUT
+          
+          # 修改退出逻辑：只在Python未安装时失败，其他情况都成功
+          if ($pythonResult.状态 -match "❌ 未安装") {
+              Write-Host "❌ 检查失败：Python未安装" -ForegroundColor Red
+              exit 1
+          } else {
+              Write-Host "✅ 检查完成" -ForegroundColor Green
+              exit 0
+          }
+          
+      - name: 上传检查报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: environment-check-reports  # 修改这里：制品名称改为英文
+          path: |
+            环境检查报告.json
+            环境检查报告.txt
+          retention-days: 30
+          
+      - name: 显示最终状态
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "=" * 50
+          Write-Host "检查完成 - 报告已保存"
+          Write-Host "=" * 50
+          Write-Host "Python状态: ${{ steps.check-env.outputs.python_status }}"
+          Write-Host "Python版本: ${{ steps.check-env.outputs.python_version }}"
+          Write-Host "Python模块安装数: ${{ steps.check-env.outputs.python_modules_installed }}/4"
+          Write-Host "VMware.PowerCLI: ${{ steps.check-env.outputs.powercli_status }}"
+          Write-Host "检查耗时: ${{ steps.check-env.outputs.execution_time }} 秒"
+          Write-Host ""
+          Write-Host "下载制品 'environment-check-reports' 获取完整报告"  # 修改这里
+          Write-Host "=" * 50
