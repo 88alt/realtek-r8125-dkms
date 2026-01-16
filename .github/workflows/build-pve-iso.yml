@@ -17,7 +17,7 @@ on:
       r8125_driver_url:
         description: 'RTL8125 Driver URL'
         required: true
-        default: 'https://github.com/88alt/realtek-r8125-dkms/releases/download/v9.016.01/realtek-r8125-dkms_9.016.01-1_amd64.deb'
+        default: 'https://github.com/timeflysoon/realtek-r8125-dkms/releases/download/v9.016.01/realtek-r8125-dkms_9.016.01-1_amd64.deb'
 permissions:
   contents: write
 # ============================【只需要修改这里】============================
