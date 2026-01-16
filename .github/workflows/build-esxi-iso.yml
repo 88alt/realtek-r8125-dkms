@@ -336,8 +336,8 @@ jobs:
         # ✅ 关键修复：使用 itemId 方式创建上传会话
         Write-Host "正在创建上传会话 (使用 itemId 方式)..."
         
-        # ✅ 使用 items/{itemId}: 而不是 root:/path:
-        $createUrl = "https://graph.microsoft.com/v1.0/drives/$driveId/items/$folderItemId:/$isoName:/createUploadSession"
+        # ✅ 修复：使用 ${} 包裹变量名，因为后面有冒号 :
+        $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/items/${folderItemId}:/${isoName}:/createUploadSession"
         
         Write-Host "创建会话 URL:"
         Write-Host "  $createUrl"
@@ -359,6 +359,10 @@ jobs:
             $uploadUrl = $session.uploadUrl
             Write-Host "✓ 上传会话创建成功"
             Write-Host "  - 会话 URL: $($uploadUrl.Substring(0, 80))..."
+            
+            # 保存到临时文件供后续使用
+            $uploadUrl | Out-File -FilePath "$env:TEMP\upload_session.txt" -Encoding UTF8
+            
         } catch {
             Write-Error "创建上传会话失败: $($_.Exception.Message)"
             if ($_.Exception.Response) {
@@ -369,6 +373,12 @@ jobs:
                 Write-Host "错误响应: $errorBody"
             }
             throw
+        }
+
+        # 从临时文件读取上传会话URL
+        $uploadUrl = Get-Content -Path "$env:TEMP\upload_session.txt" -Raw
+        if ([string]::IsNullOrEmpty($uploadUrl)) {
+            throw "未找到上传会话URL"
         }
 
         # 分片上传配置
