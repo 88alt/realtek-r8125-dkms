@@ -260,15 +260,15 @@ jobs:
             throw "ISO 创建失败"
         }
 
-    # 步骤四：幂等上传策略（检测→删除→上传）
-    - name: Upload ISO with Idempotent Strategy
+    # 步骤四：幂等上传策略（最终纯净版）
+    - name: Upload ISO with Idempotent Strategy (Pure)
       shell: pwsh
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         $OutputEncoding = [System.Text.Encoding]::UTF8
         
         Write-Host "========================================"
-        Write-Host "幂等上传策略：检测→删除→上传"
+        Write-Host "幂等上传策略：检测→删除→上传（纯净版）"
         Write-Host "========================================"
         Write-Host ""
         
@@ -378,9 +378,22 @@ jobs:
             Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method DELETE
             Write-Host "✅ 文件删除成功（或原本不存在）"
             
-            # 等待删除操作完成
+            # 等待删除操作完成并验证
             Write-Host "等待 2 秒确保删除操作完成..."
             Start-Sleep -Seconds 2
+            
+            # 可选：验证文件确实被删除（增加稳定性）
+            Write-Host "验证文件是否确实不存在..."
+            try {
+                $checkResponse = Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method GET
+                Write-Host "⚠️ 文件仍然存在，尝试再次删除..."
+                Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method DELETE
+                Start-Sleep -Seconds 1
+            } catch {
+                if ($_.Exception.Response.StatusCode -eq 404) {
+                    Write-Host "✅ 确认文件已不存在"
+                }
+            }
             
         } catch {
             # 即使删除失败也继续尝试上传（降级处理）
@@ -388,9 +401,9 @@ jobs:
             Write-Host "  将继续尝试上传..."
         }
         
-        # 6. 创建上传会话（现在文件应该不存在）
+        # 6. 创建上传会话（使用最简请求体，完全避免replace语义）
         Write-Host ""
-        Write-Host "[6/7] 创建上传会话..."
+        Write-Host "[6/7] 创建上传会话（纯净请求体）..."
         
         # 构建稳定的上传URL（使用root路径格式）
         $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}:/createUploadSession"
@@ -404,14 +417,12 @@ jobs:
             "Content-Type" = "application/json"
         }
         
-        # 使用简化请求体，不依赖replace语义
-        $bodyJson = @{
-            item = @{
-                "@microsoft.graph.conflictBehavior" = "replace"
-            }
-        } | ConvertTo-Json -Compress
+        # 最纯净的请求体：空对象，完全避免replace语义
+        # 根据Microsoft Graph API文档，createUploadSession支持空请求体
+        # 默认冲突行为是"fail"，但由于文件已删除，实际上就是创建新文件
+        $bodyJson = @{} | ConvertTo-Json -Compress
         
-        Write-Host "请求体: $bodyJson"
+        Write-Host "请求体（纯净空对象）: $bodyJson"
         Write-Host ""
         
         try {
@@ -426,6 +437,7 @@ jobs:
             Write-Host ""
             Write-Host "✅ 上传会话创建成功！"
             Write-Host "  - 使用稳定路径: /root:/${encodedFolderName}/${encodedIsoName}:"
+            Write-Host "  - 使用纯净请求体: {}"
             
             # 7. 执行分片上传
             Write-Host ""
@@ -510,7 +522,8 @@ jobs:
             Write-Host "  - 文件: $isoName"
             Write-Host "  - 大小: $([math]::Round($fileSize / 1MB, 2)) MB"
             Write-Host "  - 总块数: $totalChunks"
-            Write-Host "  - 策略: 检测→删除→上传（绕开replace语义）"
+            Write-Host "  - 策略: 检测→删除→验证→上传"
+            Write-Host "  - 请求体: 纯净空对象 {}"
             Write-Host "========================================"
             
         } catch {
