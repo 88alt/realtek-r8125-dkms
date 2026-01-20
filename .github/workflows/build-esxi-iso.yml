@@ -601,7 +601,9 @@ jobs:
         retention-days: 7
         if-no-files-found: ignore
 
-    # 新增：计算SHA256用于Release
+    # =========================
+    # 计算SHA256用于Release
+    # =========================
     - name: Calculate SHA256 for Release
       if: steps.check-artifact.outputs.artifact_path != ''
       shell: pwsh
@@ -615,106 +617,84 @@ jobs:
         
         "sha256=$hash" >> $env:GITHUB_OUTPUT
 
-    # 新增：创建GitHub Release
-    - name: Create GitHub Release
+    # =========================
+    # 删除旧的GitHub Release（如果有）
+    # =========================
+    - name: Delete Old Release if Exists
       if: steps.check-artifact.outputs.artifact_path != ''
       shell: pwsh
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.AUTH_PAT }}
       run: |
-        Write-Host "=== 创建 GitHub Release ==="
+        Write-Host "=== 删除旧的GitHub Release（如果存在）==="
         
+        # 提取tag名称（取"-RTL8125BG"之前的部分）
         $isoPath = "${{ steps.check-artifact.outputs.artifact_path }}"
         $isoName = Split-Path $isoPath -Leaf
-        
-        # 提取tag名称（取"-RTL8125BG-ISO"之前的部分）
-        # 由于文件名是ESXi-8.0U3b-24280767-RTL8125BG.iso，我们要去掉-RTL8125BG和.iso
         $tagName = $isoName -replace '\.iso$', '' -replace '-RTL8125BG$', ''
         Write-Host "提取的Tag名称: $tagName"
         
         # 检查是否存在相同tag的Release
-        Write-Host "检查是否存在相同tag的Release..."
         $releasesUrl = "https://api.github.com/repos/${{ github.repository }}/releases"
         
         try {
-            $existingReleases = Invoke-RestMethod -Uri $releasesUrl -Headers @{
+            Write-Host "获取所有Releases..."
+            $releases = Invoke-RestMethod -Uri $releasesUrl -Headers @{
                 Authorization = "Bearer $env:GITHUB_TOKEN"
                 Accept = "application/vnd.github.v3+json"
             }
             
-            $existingRelease = $existingReleases | Where-Object { $_.tag_name -eq $tagName } | Select-Object -First 1
+            $oldRelease = $releases | Where-Object { $_.tag_name -eq $tagName } | Select-Object -First 1
             
-            if ($existingRelease) {
-                Write-Host "找到相同tag的Release，删除旧的..."
-                $deleteUrl = "https://api.github.com/repos/${{ github.repository }}/releases/$($existingRelease.id)"
+            if ($oldRelease) {
+                Write-Host "找到旧的Release，删除ID: $($oldRelease.id)..."
+                $deleteUrl = "https://api.github.com/repos/${{ github.repository }}/releases/$($oldRelease.id)"
                 Invoke-RestMethod -Uri $deleteUrl -Headers @{
                     Authorization = "Bearer $env:GITHUB_TOKEN"
                     Accept = "application/vnd.github.v3+json"
                 } -Method DELETE
-                Write-Host "旧Release删除成功"
+                Write-Host "✅ 旧Release删除成功"
                 
-                # 删除tag（如果有）
+                # 删除关联的tag
+                Write-Host "删除关联的tag: $tagName"
                 $deleteTagUrl = "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tagName"
                 try {
                     Invoke-RestMethod -Uri $deleteTagUrl -Headers @{
                         Authorization = "Bearer $env:GITHUB_TOKEN"
                         Accept = "application/vnd.github.v3+json"
                     } -Method DELETE
-                    Write-Host "旧tag删除成功"
+                    Write-Host "✅ 旧tag删除成功"
                 } catch {
-                    Write-Host "删除tag时出现错误（可能不存在）: $_"
+                    Write-Host "⚠️ 删除tag时出错（可能不存在）: $_"
                 }
+            } else {
+                Write-Host "没有找到相同tag的旧Release"
             }
         } catch {
-            Write-Host "获取Release列表时出错: $_"
+            Write-Host "⚠️ 删除旧Release时出错: $_"
+            # 不抛出错误，继续执行
         }
-        
-        # 创建新的Release
-        Write-Host "创建新的Release: $tagName"
-        
-        $releaseBody = @{
-            tag_name = $tagName
-            name = "ESXi 8.0U3b Custom ISO with RTL8125BG Driver"
-            body = "Custom ESXi 8.0U3b ISO with RTL8125BG, NVMe, and USB NIC drivers integrated`n`n- **ESXi Version**: 8.0U3b (24280767)`n- **RTL8125BG Driver Version**: 1.101.01`n- **SHA256**: ${{ steps.calculate_sha256.outputs.sha256 }}"
-            draft = $false
-            prerelease = $false
-        } | ConvertTo-Json
-        
-        try {
-            $newRelease = Invoke-RestMethod -Uri $releasesUrl -Headers @{
-                Authorization = "Bearer $env:GITHUB_TOKEN"
-                Accept = "application/vnd.github.v3+json"
-            } -Method POST -Body $releaseBody -ContentType "application/json"
-            
-            $releaseId = $newRelease.id
-            Write-Host "Release创建成功，ID: $releaseId"
-            
-            # 上传ISO文件到Release
-            Write-Host "上传ISO文件到Release..."
-            $uploadUrl = "https://uploads.github.com/repos/${{ github.repository }}/releases/$releaseId/assets?name=$isoName"
-            
-            $fileBytes = [System.IO.File]::ReadAllBytes($isoPath)
-            Invoke-RestMethod -Uri $uploadUrl -Headers @{
-                Authorization = "Bearer $env:GITHUB_TOKEN"
-                Accept = "application/vnd.github.v3+json"
-                "Content-Type" = "application/octet-stream"
-            } -Method POST -Body $fileBytes
-            
-            Write-Host "✅ Release创建和文件上传完成！"
-            Write-Host "🔗 Release链接: $($newRelease.html_url)"
-            
-        } catch {
-            Write-Error "创建Release失败: $_"
-            if ($_.Exception.Response) {
-                $errorStream = $_.Exception.Response.GetResponseStream()
-                $reader = New-Object System.IO.StreamReader($errorStream)
-                $errorBody = $reader.ReadToEnd()
-                $reader.Close()
-                $errorStream.Close()
-                Write-Host "错误响应: $errorBody"
-            }
-            throw
-        }
+
+    # =========================
+    # 创建 GitHub Release
+    # =========================
+    - name: Create GitHub Release
+      if: steps.check-artifact.outputs.artifact_path != ''
+      uses: softprops/action-gh-release@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.AUTH_PAT }}
+      with:
+        tag_name: ESXi-8.0U3b-24280767
+        name: ESXi 8.0U3b Custom ISO with RTL8125BG Driver
+        body: |
+          - **ESXi 版本**: 8.0U3b (24280767)
+          - **RTL8125BG 驱动版本**: 1.101.01
+          - **SHA256**: ${{ steps.calculate_sha256.outputs.sha256 }}
+        files: |
+          ${{ steps.check-artifact.outputs.artifact_path }}
+        draft: false
+        prerelease: false
+        generate_release_notes: false
 
     - name: Display Artifact Download Link
       if: steps.upload-artifact.outputs.artifact-id != ''
