@@ -3,14 +3,6 @@ name: Build PVE ISO with RTL8125 (Cloud Only)
 on:
   workflow_dispatch:
     inputs:
-      force_rebuild:
-        description: '强制重新构建（即使版本相同）'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
       proxmox_iso_filename:
         description: 'Proxmox ISO 文件名（在 OneDrive 中）'
         required: true
@@ -50,130 +42,136 @@ jobs:
           sudo apt-get install -y xorriso curl file jq
 
       # =========================
-      # 获取 OneDrive 文件夹信息
+      # 获取 OneDrive 驱动和文件夹信息
       # =========================
-      - name: Get OneDrive Folder Information
+      - name: Get OneDrive Drive and Folder Information
         id: get_drive_info
+        shell: pwsh
         run: |
-          echo "=== 获取 OneDrive 文件夹信息 ==="
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $OutputEncoding = [System.Text.Encoding]::UTF8
           
-          # 获取访问令牌
-          tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
+          Write-Host "=== 获取驱动和文件夹信息 ==="
           
-          body="client_id=$OD_CLIENT_ID&scope=https://graph.microsoft.com/.default&client_secret=$OD_CLIENT_SECRET&grant_type=client_credentials"
+          $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
+          $body = @{
+              client_id     = $env:OD_CLIENT_ID
+              scope         = "https://graph.microsoft.com/.default"
+              client_secret = $env:OD_CLIENT_SECRET
+              grant_type    = "client_credentials"
+          }
           
-          echo "正在获取访问令牌..."
-          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body" "$tokenUrl")
-          token=$(echo "$tokenResponse" | jq -r '.access_token // empty')
+          Write-Host "正在获取访问令牌..."
+          try {
+              $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
+              $token = ($tokenResponse.access_token).Trim()
+              
+              if ([string]::IsNullOrEmpty($token)) {
+                  throw "获取到的访问令牌为空"
+              }
+              Write-Host "✓ 访问令牌获取成功"
+          } catch {
+              Write-Error "获取访问令牌失败: $_"
+              throw
+          }
           
-          if [ -z "$token" ]; then
-            echo "❌ 访问令牌获取失败"
-            exit 1
-          fi
+          Write-Host "正在解析共享链接..."
+          $encodedLink = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:SHARED_LINK)).TrimEnd("=")
+          $shareUrl = "https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
           
-          # 解析共享链接
-          echo "正在解析共享链接..."
-          encodedLink=$(echo -n "$SHARED_LINK" | base64 -w 0 | tr -d '=' | tr '/+' '_-')
-          shareUrl="https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
-          
-          headers="Authorization: Bearer $token"
-          driveItem=$(curl -s -H "$headers" -X GET "$shareUrl")
-          
-          # 提取驱动和文件夹信息
-          driveId=$(echo "$driveItem" | jq -r '.parentReference.driveId // empty')
-          folderName=$(echo "$driveItem" | jq -r '.name // empty')
-          
-          if [ -z "$driveId" ]; then
-            echo "❌ 无法获取 Drive ID"
-            exit 1
-          fi
-          
-          echo "driveId=$driveId" >> $GITHUB_OUTPUT
-          echo "folderName=$folderName" >> $GITHUB_OUTPUT
-          
-          echo "✅ OneDrive 信息获取成功"
-          echo "  - Drive ID: $driveId"
-          echo "  - 文件夹名: $folderName"
+          try {
+              $headers = @{ Authorization = "Bearer $token" }
+              $driveItem = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
+              
+              $driveId = $driveItem.parentReference.driveId
+              $folderItemId = $driveItem.id
+              $folderName = $driveItem.name
+              
+              Write-Host "✓ 驱动信息获取成功:"
+              Write-Host "  - Drive ID: $driveId"
+              Write-Host "  - Folder Item ID: $folderItemId"
+              Write-Host "  - 文件夹名: $folderName"
+              
+              "driveId=$driveId" >> $env:GITHUB_OUTPUT
+              "folderItemId=$folderItemId" >> $env:GITHUB_OUTPUT
+              "folderName=$folderName" >> $env:GITHUB_OUTPUT
+              
+          } catch {
+              Write-Error "获取驱动信息失败: $_"
+              throw
+          }
 
       # =========================
-      # 从 OneDrive 下载文件（简化版）
+      # 下载文件（使用PowerShell，参考ESXi工作流）
       # =========================
       - name: Download Files from OneDrive
+        shell: pwsh
         run: |
-          echo "=== 从 OneDrive 下载文件 ==="
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $OutputEncoding = [System.Text.Encoding]::UTF8
           
-          # 获取下载令牌
-          tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
-          body="client_id=$OD_CLIENT_ID&scope=https://graph.microsoft.com/.default&client_secret=$OD_CLIENT_SECRET&grant_type=client_credentials"
+          Write-Host "=== 下载文件 ==="
           
-          echo "正在获取下载令牌..."
-          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body" "$tokenUrl")
-          token=$(echo "$tokenResponse" | jq -r '.access_token // empty')
+          Write-Host "正在获取下载用的访问令牌..."
+          $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
+          $body = @{
+              client_id     = $env:OD_CLIENT_ID
+              scope         = "https://graph.microsoft.com/.default"
+              client_secret = $env:OD_CLIENT_SECRET
+              grant_type    = "client_credentials"
+          }
           
-          if [ -z "$token" ]; then
-            echo "❌ 下载令牌获取失败"
-            exit 1
-          fi
+          $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
+          $token = ($tokenResponse.access_token).Trim()
+          Write-Host "✓ 下载令牌获取成功"
           
-          # 创建下载目录
-          mkdir -p downloads
+          $downloadDir = "downloads"
+          New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
           
-          # 下载文件列表
-          files=(
-            "${{ github.event.inputs.proxmox_iso_filename }}"
-            "${{ github.event.inputs.r8125_driver_filename }}"
-          )
+          $proxmoxIso = "${{ github.event.inputs.proxmox_iso_filename }}"
+          $driverFile = "${{ github.event.inputs.r8125_driver_filename }}"
           
-          successCount=0
-          driveId="${{ steps.get_drive_info.outputs.driveId }}"
-          folderName="${{ steps.get_drive_info.outputs.folderName }}"
+          $files = @($proxmoxIso, $driverFile)
           
-          for file in "${files[@]}"; do
-            echo ""
-            echo "下载: $file"
-            
-            # URL编码文件名
-            encodedFile=$(echo -n "$file" | jq -sRr @uri)
-            downloadUrl="https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${folderName}/${encodedFile}:/content"
-            
-            # 使用curl直接下载（无需分片）
-            if curl -fL -H "Authorization: Bearer $token" -o "downloads/$file" "$downloadUrl"; then
-              fileSize=$(stat -c%s "downloads/$file" 2>/dev/null || echo 0)
-              if [ "$fileSize" -gt 0 ]; then
-                if [[ "$file" == *.iso ]] && [ "$fileSize" -lt 1000000000 ]; then
-                  echo "❌ ISO 文件过小，可能下载失败"
-                  exit 1
-                elif [[ "$file" == *.deb ]] && [ "$fileSize" -lt 50000 ]; then
-                  echo "❌ 驱动文件过小，可能下载失败"
-                  exit 1
-                fi
-                
-                sizeMB=$((fileSize/1024/1024))
-                sizeKB=$((fileSize/1024))
-                if [[ "$file" == *.iso ]]; then
-                  echo "✅ $file ($sizeMB MB)"
-                else
-                  echo "✅ $file ($sizeKB KB)"
-                fi
-                successCount=$((successCount+1))
-              else
-                echo "❌ $file 下载失败，文件大小为0"
-              fi
-            else
-              echo "❌ $file 下载失败"
-            fi
-          done
+          $headers = @{ Authorization = "Bearer $token" }
+          $successCount = 0
+          $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
+          $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
           
-          if [ $successCount -ne ${#files[@]} ]; then
-            echo "❌ 下载完成: $successCount/${#files[@]} 个文件"
-            exit 1
-          fi
+          foreach ($file in $files) {
+              $downloadUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${folderName}/${file}:/content"
+              $outFile = Join-Path $downloadDir $file
+              
+              Write-Host "下载: $file"
+              try {
+                  Invoke-RestMethod -Method GET -Uri $downloadUrl -Headers $headers -OutFile $outFile
+                  
+                  if (Test-Path $outFile) {
+                      $fileSize = (Get-Item $outFile).Length
+                      $successCount++
+                      
+                      if ($file.EndsWith(".iso")) {
+                          $sizeMB = $fileSize / 1MB
+                          Write-Host "✓ $file ($([math]::Round($sizeMB, 2)) MB)"
+                      } else {
+                          $sizeKB = $fileSize / 1KB
+                          Write-Host "✓ $file ($([math]::Round($sizeKB, 2)) KB)"
+                      }
+                  }
+              } catch {
+                  Write-Host "✗ $file - $($_.Exception.Message)"
+              }
+          }
           
-          echo "✅ 所有文件下载成功"
+          if ($successCount -ne $files.Count) {
+              throw "下载完成: $successCount/$($files.Count) 个文件"
+          }
+          
+          Write-Host "✓ 所有文件下载成功"
           
           # 设置环境变量
-          echo "ISO_ORIG=downloads/${{ github.event.inputs.proxmox_iso_filename }}" >> $GITHUB_ENV
-          echo "DRIVER_FILE=downloads/${{ github.event.inputs.r8125_driver_filename }}" >> $GITHUB_ENV
+          "ISO_ORIG=downloads/$proxmoxIso" >> $env:GITHUB_ENV
+          "DRIVER_FILE=downloads/$driverFile" >> $env:GITHUB_ENV
 
       # =========================
       # 验证 ISO 文件
@@ -229,41 +227,42 @@ jobs:
           fi
 
       # =========================
-      # 检查是否需要重建
+      # 检查并删除现有的GitHub Release
       # =========================
-      - name: Check Rebuild Requirement
-        id: check_rebuild
+      - name: Check and Delete Existing GitHub Release
+        shell: pwsh
         run: |
-          echo "=== 检查重建需求 ==="
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $OutputEncoding = [System.Text.Encoding]::UTF8
           
-          SKIP_BUILD=false
+          Write-Host "=== 检查并删除现有的 GitHub Release ==="
           
-          if [ "${{ github.event.inputs.force_rebuild }}" = "false" ]; then
-            echo "检查现有 GitHub Release..."
-            RELEASE_INFO=$(curl -s \
-              -H "Authorization: token ${{ github.token }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${PVE_VERSION}-r8125")
-            
-            RELEASE_STATUS=$(echo "$RELEASE_INFO" | jq -r '.message // "found"')
-            
-            if [ "$RELEASE_STATUS" != "Not Found" ]; then
-              echo "✅ 版本 pve-${PVE_VERSION}-r8125 已存在"
-              SKIP_BUILD=true
-            else
-              echo "❌ 版本 pve-${PVE_VERSION}-r8125 不存在，需要构建"
-            fi
-          else
-            echo "⚠️  强制重建模式启用"
-          fi
+          $releaseTag = "pve-${{ env.PVE_VERSION }}-r8125"
+          $releaseUrl = "https://api.github.com/repos/${{ github.repository }}/releases/tags/${releaseTag}"
+          $authHeader = @{ Authorization = "token ${{ github.token }}" }
           
-          echo "skip_build=$SKIP_BUILD" >> $GITHUB_OUTPUT
+          Write-Host "检查 Release: $releaseTag"
+          
+          try {
+              $releaseInfo = Invoke-RestMethod -Uri $releaseUrl -Headers $authHeader -ErrorAction Stop
+              Write-Host "✅ 找到现有的 Release: $($releaseInfo.name)"
+              
+              # 删除现有的 Release
+              $deleteUrl = "https://api.github.com/repos/${{ github.repository }}/releases/$($releaseInfo.id)"
+              Invoke-RestMethod -Uri $deleteUrl -Headers $authHeader -Method DELETE
+              Write-Host "✅ 已删除现有的 Release"
+          } catch {
+              if ($_.Exception.Response.StatusCode -eq 404) {
+                  Write-Host "✅ Release 不存在，无需删除"
+              } else {
+                  Write-Host "⚠️ 检查 Release 失败: $($_.Exception.Message)"
+              }
+          }
 
       # =========================
       # 构建自定义 ISO
       # =========================
       - name: Build Custom ISO
-        if: steps.check_rebuild.outputs.skip_build != 'true'
         run: |
           echo "=== 构建自定义 ISO ==="
           
@@ -322,17 +321,16 @@ jobs:
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
 
       # =========================
-      # 快速上传到 OneDrive（使用原始的快速上传代码）
+      # 幂等上传到 OneDrive（完全使用ESXi工作流的代码）
       # =========================
-      - name: Fast Upload to OneDrive
-        if: steps.check_rebuild.outputs.skip_build != 'true'
+      - name: Upload ISO with Idempotent Strategy
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $OutputEncoding = [System.Text.Encoding]::UTF8
           
           Write-Host "========================================"
-          Write-Host "快速上传策略：检测→删除→上传"
+          Write-Host "幂等上传策略：检测→删除→上传（纯净版）"
           Write-Host "========================================"
           Write-Host ""
           
@@ -364,9 +362,6 @@ jobs:
           Write-Host ""
           Write-Host "[2/7] 验证ISO文件..."
           $isoPath = "${{ env.ISO_OUTPUT }}"
-          if ([string]::IsNullOrEmpty($isoPath)) {
-              $isoPath = "PVE-${{ env.PVE_VERSION }}-r8125.iso"
-          }
           if (-not (Test-Path $isoPath)) { 
               throw "ISO 文件不存在: $isoPath" 
           }
@@ -482,8 +477,6 @@ jobs:
           }
           
           # 最纯净的请求体：空对象，完全避免replace语义
-          # 根据Microsoft Graph API文档，createUploadSession支持空请求体
-          # 默认冲突行为是"fail"，但由于文件已删除，实际上就是创建新文件
           $bodyJson = @{} | ConvertTo-Json -Compress
           
           Write-Host "请求体（纯净空对象）: $bodyJson"
@@ -582,7 +575,7 @@ jobs:
               $fileStream.Close()
               Write-Host ""
               Write-Host "========================================"
-              Write-Host "✅ 快速上传完成！"
+              Write-Host "✅ 幂等上传完成！"
               Write-Host "  - 文件: $isoName"
               Write-Host "  - 大小: $([math]::Round($fileSize / 1MB, 2)) MB"
               Write-Host "  - 总块数: $totalChunks"
@@ -631,7 +624,6 @@ jobs:
       # 创建 GitHub Release
       # =========================
       - name: Create GitHub Release
-        if: steps.check_rebuild.outputs.skip_build != 'true'
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -652,7 +644,6 @@ jobs:
       # 上传到 GitHub Artifacts
       # =========================
       - name: Upload to GitHub Artifacts
-        if: steps.check_rebuild.outputs.skip_build != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: PVE-${{ env.PVE_VERSION }}-R8125-ISO
