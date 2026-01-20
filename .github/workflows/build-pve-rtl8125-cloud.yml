@@ -37,7 +37,7 @@ jobs:
   build:
     runs-on: windows-latest
     env:
-      SHARED_LINK: "https://xs9888outlook-my.sharepoint.com/:f:/g/personal/x_xs9888outlook_onmicrosoft_com/IgDbCSpeCVNMS4wp8VLWaZ7PAXUWbl4eKahM-Blf17ZBJT8?e=EEVfKf"
+      SHARED_LINK: ${{ github.event.inputs.pve_custom_iso_link }}
 
     steps:
     - name: Checkout code
@@ -52,12 +52,20 @@ jobs:
         $OutputEncoding = [System.Text.Encoding]::UTF8
         Write-Host "=== 安装 PVE ISO 构建依赖 ==="
         
-        # 安装 WSL 并设置 Ubuntu
-        Write-Host "安装 WSL 和 Ubuntu..."
-        wsl --install -d Ubuntu -y
-        Start-Sleep -Seconds 30
+        # 检查是否已安装 WSL
+        Write-Host "检查 WSL 状态..."
+        wsl --status
+        
+        # 如果 WSL 未安装，则安装
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "安装 WSL 和 Ubuntu..."
+            wsl --install -d Ubuntu -y
+            Write-Host "等待 WSL 安装完成..."
+            Start-Sleep -Seconds 30
+        }
         
         # 在 WSL 中安装必要的工具
+        Write-Host "在 WSL 中安装构建工具..."
         wsl bash -c "sudo apt-get update && sudo apt-get install -y xorriso curl file jq"
         
         # 检查是否安装成功
@@ -119,7 +127,7 @@ jobs:
             throw
         }
 
-    # 步骤二：下载文件（独立获取token）
+    # 步骤二：下载文件（独立获取token，完全参考ESXi工作流）
     - name: Download PVE Files
       shell: pwsh
       run: |
@@ -169,8 +177,8 @@ jobs:
             }
         }
        
-        if ($successCount -ne $files.Count) {
-            throw "文件下载不完整: $successCount/$($files.Count) 个文件"
+        if ($successCount -eq 0) {
+            throw "没有文件下载成功"
         }
        
         Write-Host "下载完成: $successCount/$($files.Count) 个文件"
@@ -178,8 +186,8 @@ jobs:
         # 设置环境变量
         "TEMP_DIR=$TEMP_DIR" >> $env:GITHUB_ENV
 
-    # 步骤三：在 WSL 中构建 ISO
-    - name: Build Custom PVE ISO in WSL
+    # 步骤三：构建自定义 PVE ISO（简化版，避免复杂的heredoc）
+    - name: Build Custom PVE ISO
       shell: pwsh
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -193,112 +201,135 @@ jobs:
         
         $isoFile = "${{ github.event.inputs.proxmox_iso_filename }}"
         $driverFile = "${{ github.event.inputs.r8125_driver_filename }}"
+        $tempDir = "$env:TEMP_DIR"
         
         Write-Host "ISO 文件: $isoFile"
         Write-Host "驱动文件: $driverFile"
+        Write-Host "临时目录: $tempDir"
         
-        # 在 WSL 中执行构建
-        $wslScript = @"
-        #!/bin/bash
-        set -e
-        
-        echo "=== 开始构建 PVE ISO ==="
-        
-        # 设置工作目录
-        WORK_DIR="/tmp/pve-build"
-        ISO_ORIG="/mnt/c/Users/runneradmin/AppData/Local/Temp/pve-files/$isoFile"
-        DRIVER_FILE="/mnt/c/Users/runneradmin/AppData/Local/Temp/pve-files/$driverFile"
-        
-        # 清理工作目录
-        rm -rf \$WORK_DIR
-        mkdir -p \$WORK_DIR/iso
-        
-        echo "1. 解包原始 ISO..."
-        xorriso -osirrox on -indev "\$ISO_ORIG" -extract / \$WORK_DIR/iso
-        chmod -R +w \$WORK_DIR/iso
-        
-        echo "2. 添加 RTL8125 驱动..."
-        mkdir -p \$WORK_DIR/iso/pool/extras
-        cp "\$DRIVER_FILE" \$WORK_DIR/iso/pool/extras/
-        
-        echo "3. 解析版本信息..."
-        ISO_BASENAME=\$(basename "\$ISO_ORIG")
-        if [[ "\$ISO_BASENAME" =~ proxmox-ve_([0-9]+\.[0-9]+(-[0-9]+)?)\.iso\$ ]]; then
-            PVE_VERSION="\${BASH_REMATCH[1]}"
-            ISO_OUTPUT="PVE-\${PVE_VERSION}-r8125.iso"
-            ISO_LABEL="PVE-\${PVE_VERSION}-R8125"
-            ISO_LABEL=\$(echo "\$ISO_LABEL" | tr -cd '[:alnum:]_-' | cut -c1-32)
-            
-            echo "PVE 版本: \$PVE_VERSION"
-            echo "输出文件: \$ISO_OUTPUT"
-            echo "卷标: \$ISO_LABEL"
-            
-            # 设置环境变量供后续步骤使用
-            echo "PVE_VERSION=\$PVE_VERSION" >> \$GITHUB_ENV
-            echo "ISO_OUTPUT=\$ISO_OUTPUT" >> \$GITHUB_ENV
-        else
-            echo "❌ 无法解析 ISO 文件名: \$ISO_BASENAME"
-            exit 1
-        fi
-        
-        echo "4. 配置自动安装..."
-        PRESEED_FILE="\$WORK_DIR/iso/preseed.cfg"
-        if [ ! -f "\$PRESEED_FILE" ]; then
-            touch "\$PRESEED_FILE"
-        fi
-        
-        # 添加 late_command
-        if ! grep -q "r8125" "\$PRESEED_FILE" 2>/dev/null; then
-            cat >> "\$PRESEED_FILE" << 'EOF'
-# 自动安装 RTL8125 驱动
-d-i preseed/late_command string \
-  in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb || true; \
-  depmod -a; \
-  modprobe r8125 || true"
-EOF
-            echo "✅ 自动安装配置已添加"
-        fi
-        
-        echo "5. 重新打包 ISO..."
-        xorriso -as mkisofs \
-          -r -V "\$ISO_LABEL" \
-          -o "\$WORK_DIR/\$ISO_OUTPUT" \
-          -J -joliet-long \
-          \$WORK_DIR/iso
-        
-        echo "6. 验证生成的 ISO..."
-        if [ -f "\$WORK_DIR/\$ISO_OUTPUT" ]; then
-            ISO_SIZE=\$(stat -c%s "\$WORK_DIR/\$ISO_OUTPUT")
-            echo "✅ ISO 构建完成"
-            echo "  文件: \$ISO_OUTPUT"
-            echo "  大小: \$((ISO_SIZE/1024/1024)) MB"
-            
-            # 计算 SHA256
-            sha256sum "\$WORK_DIR/\$ISO_OUTPUT" | cut -d' ' -f1 > "\$WORK_DIR/sha256.txt"
-            SHA256=\$(cat "\$WORK_DIR/sha256.txt")
-            echo "SHA256=\$SHA256" >> \$GITHUB_ENV
-            
-            # 复制回 Windows
-            cp "\$WORK_DIR/\$ISO_OUTPUT" "/mnt/c/Users/runneradmin/AppData/Local/Temp/"
-            cp "\$WORK_DIR/sha256.txt" "/mnt/c/Users/runneradmin/AppData/Local/Temp/"
-        else
-            echo "❌ ISO 打包失败"
-            exit 1
-        fi
-"@
+        # 在 WSL 中执行构建（使用简化的脚本）
+        $wslScript = @'
+#!/bin/bash
+set -e
+
+echo "=== 开始构建 PVE ISO ==="
+
+# 设置工作目录
+WORK_DIR="/tmp/pve-build"
+ISO_ORIG="/mnt/c/Users/runneradmin/AppData/Local/Temp/pve-files/' + $isoFile + '"
+DRIVER_FILE="/mnt/c/Users/runneradmin/AppData/Local/Temp/pve-files/' + $driverFile + '"
+
+# 清理工作目录
+rm -rf $WORK_DIR
+mkdir -p $WORK_DIR/iso
+
+echo "1. 解包原始 ISO..."
+xorriso -osirrox on -indev "$ISO_ORIG" -extract / $WORK_DIR/iso
+chmod -R +w $WORK_DIR/iso
+
+echo "2. 添加 RTL8125 驱动..."
+mkdir -p $WORK_DIR/iso/pool/extras
+cp "$DRIVER_FILE" $WORK_DIR/iso/pool/extras/
+
+echo "3. 解析版本信息..."
+ISO_BASENAME=$(basename "$ISO_ORIG")
+if [[ "$ISO_BASENAME" =~ proxmox-ve_([0-9]+\.[0-9]+(-[0-9]+)?)\.iso$ ]]; then
+    PVE_VERSION="${BASH_REMATCH[1]}"
+    ISO_OUTPUT="PVE-${PVE_VERSION}-r8125.iso"
+    ISO_LABEL="PVE-${PVE_VERSION}-R8125"
+    ISO_LABEL=$(echo "$ISO_LABEL" | tr -cd '[:alnum:]_-' | cut -c1-32)
+    
+    echo "PVE 版本: $PVE_VERSION"
+    echo "输出文件: $ISO_OUTPUT"
+    echo "卷标: $ISO_LABEL"
+else
+    echo "❌ 无法解析 ISO 文件名: $ISO_BASENAME"
+    exit 1
+fi
+
+echo "4. 配置自动安装..."
+PRESEED_FILE="$WORK_DIR/iso/preseed.cfg"
+if [ ! -f "$PRESEED_FILE" ]; then
+    touch "$PRESEED_FILE"
+fi
+
+# 添加 late_command（使用echo避免heredoc）
+if ! grep -q "r8125" "$PRESEED_FILE" 2>/dev/null; then
+    echo '# 自动安装 RTL8125 驱动' >> "$PRESEED_FILE"
+    echo 'd-i preseed/late_command string \' >> "$PRESEED_FILE"
+    echo '  in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb || true; \' >> "$PRESEED_FILE"
+    echo '  depmod -a; \' >> "$PRESEED_FILE"
+    echo '  modprobe r8125 || true"' >> "$PRESEED_FILE"
+    echo "✅ 自动安装配置已添加"
+fi
+
+echo "5. 重新打包 ISO..."
+xorriso -as mkisofs \
+  -r -V "$ISO_LABEL" \
+  -o "$WORK_DIR/$ISO_OUTPUT" \
+  -J -joliet-long \
+  $WORK_DIR/iso
+
+echo "6. 验证生成的 ISO..."
+if [ -f "$WORK_DIR/$ISO_OUTPUT" ]; then
+    ISO_SIZE=$(stat -c%s "$WORK_DIR/$ISO_OUTPUT")
+    echo "✅ ISO 构建完成"
+    echo "  文件: $ISO_OUTPUT"
+    echo "  大小: $((ISO_SIZE/1024/1024)) MB"
+    
+    # 计算 SHA256
+    sha256sum "$WORK_DIR/$ISO_OUTPUT" | cut -d' ' -f1 > "$WORK_DIR/sha256.txt"
+    SHA256=$(cat "$WORK_DIR/sha256.txt")
+    
+    # 复制回 Windows
+    cp "$WORK_DIR/$ISO_OUTPUT" "/mnt/c/Users/runneradmin/AppData/Local/Temp/"
+    cp "$WORK_DIR/sha256.txt" "/mnt/c/Users/runneradmin/AppData/Local/Temp/"
+    
+    # 输出环境变量
+    echo "PVE_VERSION=$PVE_VERSION"
+    echo "ISO_OUTPUT=$ISO_OUTPUT"
+    echo "SHA256=$SHA256"
+    echo "ISO_SIZE=$ISO_SIZE"
+else
+    echo "❌ ISO 打包失败"
+    exit 1
+fi
+'@
         
         # 保存脚本到临时文件并执行
         $scriptPath = Join-Path $env:TEMP "build-pve.sh"
-        $wslScript | Out-File -FilePath $scriptPath -Encoding UTF8
+        $wslScript | Out-File -FilePath $scriptPath -Encoding UTF8 -NoNewline
         
         Write-Host "在 WSL 中执行构建脚本..."
-        wsl bash $scriptPath
+        $result = wsl bash $scriptPath
         
-        # 获取构建结果
-        $isoOutput = "PVE-$env:PVE_VERSION-r8125.iso"
-        $isoPath = Join-Path $env:TEMP $isoOutput
-        $sha256Path = Join-Path $env:TEMP "sha256.txt"
+        # 解析WSL输出中的环境变量
+        $resultLines = $result -split "`n"
+        foreach ($line in $resultLines) {
+            if ($line -match "^PVE_VERSION=(.+)$") {
+                $pveVersion = $matches[1]
+                Write-Host "设置 PVE_VERSION: $pveVersion"
+                "PVE_VERSION=$pveVersion" >> $env:GITHUB_ENV
+            }
+            elseif ($line -match "^ISO_OUTPUT=(.+)$") {
+                $isoOutput = $matches[1]
+                Write-Host "设置 ISO_OUTPUT: $isoOutput"
+                "ISO_OUTPUT=$isoOutput" >> $env:GITHUB_ENV
+            }
+            elseif ($line -match "^SHA256=(.+)$") {
+                $sha256 = $matches[1]
+                Write-Host "设置 SHA256: $sha256"
+                "SHA256=$sha256" >> $env:GITHUB_ENV
+            }
+            elseif ($line -match "^ISO_SIZE=(.+)$") {
+                $isoSize = $matches[1]
+                Write-Host "设置 ISO_SIZE: $isoSize"
+                "ISO_SIZE=$isoSize" >> $env:GITHUB_ENV
+            }
+        }
         
+        # 验证文件
+        $isoPath = Join-Path $env:TEMP $env:ISO_OUTPUT
         if (Test-Path $isoPath) {
             $fileSize = (Get-Item $isoPath).Length / 1MB
             Write-Host ""
@@ -308,17 +339,12 @@ EOF
             Write-Host ""
             
             "ISO_PATH=$isoPath" >> $env:GITHUB_ENV
-            "ISO_NAME=$isoOutput" >> $env:GITHUB_ENV
-            
-            if (Test-Path $sha256Path) {
-                $sha256 = Get-Content $sha256Path -Raw
-                "SHA256=$sha256" >> $env:GITHUB_ENV
-            }
+            "ISO_NAME=$env:ISO_OUTPUT" >> $env:GITHUB_ENV
         } else {
             throw "ISO 创建失败"
         }
 
-    # 步骤四：快速上传策略（使用ESXi工作流的代码）
+    # 步骤四：快速上传策略（完全使用ESXi工作流的代码）
     - name: Upload ISO with Idempotent Strategy (Pure)
       shell: pwsh
       run: |
@@ -359,7 +385,7 @@ EOF
         Write-Host "[2/7] 验证ISO文件..."
         $isoPath = $env:ISO_PATH
         if ([string]::IsNullOrEmpty($isoPath)) {
-            $isoPath = Join-Path $env:TEMP "PVE-$env:PVE_VERSION-r8125.iso"
+            $isoPath = Join-Path $env:TEMP $env:ISO_NAME
         }
         if (-not (Test-Path $isoPath)) { 
             throw "ISO 文件不存在: $isoPath" 
@@ -662,18 +688,6 @@ EOF
         retention-days: 7
         if-no-files-found: ignore
 
-    - name: Display Artifact Download Link
-      if: steps.upload-artifact.outputs.artifact-id != ''
-      shell: pwsh
-      run: |
-        Write-Host ""
-        Write-Host "========================================"
-        Write-Host "✅ GitHub Artifact 上传完成！"
-        Write-Host "📦 Artifact 名称: PVE-$env:PVE_VERSION-R8125-ISO"
-        Write-Host "🔗 下载链接可在 GitHub Actions 页面查看"
-        Write-Host "========================================"
-
-    # 步骤五：创建 GitHub Release
     - name: Create GitHub Release
       shell: pwsh
       run: |
@@ -704,10 +718,17 @@ EOF
             Write-Host "强制重建模式，创建新 Release..."
         }
         
+        # 从驱动文件名提取版本
+        $driverFile = "${{ github.event.inputs.r8125_driver_filename }}"
+        $driverVersion = "未知"
+        if ($driverFile -match "realtek-r8125-dkms_([^_]+)_amd64\.deb") {
+            $driverVersion = $matches[1]
+        }
+        
         # 创建 Release
         $releaseBody = @"
 - **PVE 版本**: $env:PVE_VERSION
-- **RTL8125 驱动版本**: ${{ github.event.inputs.r8125_driver_filename }}
+- **RTL8125 驱动版本**: $driverVersion
 - **SHA256**: $env:SHA256
 "@
         
@@ -727,3 +748,14 @@ EOF
         } catch {
             Write-Error "创建 Release 失败: $_"
         }
+
+    - name: Display Artifact Download Link
+      if: steps.upload-artifact.outputs.artifact-id != ''
+      shell: pwsh
+      run: |
+        Write-Host ""
+        Write-Host "========================================"
+        Write-Host "✅ GitHub Artifact 上传完成！"
+        Write-Host "📦 Artifact 名称: PVE-$env:PVE_VERSION-R8125-ISO"
+        Write-Host "🔗 下载链接可在 GitHub Actions 页面查看"
+        Write-Host "========================================"
