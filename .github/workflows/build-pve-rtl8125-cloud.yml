@@ -14,7 +14,7 @@ on:
       pve_custom_iso_link:
         description: 'OneDrive PVE-Custom-ISO 共享链接'
         required: true
-        default: 'https://xs9888outlook-my.sharepoint.com/:f:/g/personal/x_xs9888outlook_onmicrosoft_com/IgDbCSpeCVNMS4wp8VLWaZ7PAXUWbl4eKahM-Blf17ZBJT8?e=EEVfKf'
+        default: 'https://xs9888outlook-my.sharepoint.com/:f:/g/personal/x_xs9888outlook_onmicrosoft_com/IgDbCSpeCVNMS4wp8VLWaZ7B7eCjv_Wet1zH9tRTKYMKCA?e=4ixqgj'
 
 permissions:
   contents: write
@@ -23,14 +23,11 @@ env:
   OD_CLIENT_ID: ${{ secrets.OD_CLIENT_ID }}
   OD_CLIENT_SECRET: ${{ secrets.OD_CLIENT_SECRET }}
   OD_TENANT_ID: ${{ secrets.OD_TENANT_ID }}
-  SHARED_LINK: ${{ github.event.inputs.pve_custom_iso_link }}
 
 jobs:
   build:
     runs-on: windows-latest
-    env:
-      SHARED_LINK: ${{ github.event.inputs.pve_custom_iso_link }}
-
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -64,10 +61,11 @@ jobs:
         wsl bash -c "which xorriso"
         wsl bash -c "xorriso --version"
 
-    # 步骤一：获取驱动信息（只用一次）
     - name: Get Drive and Folder Information
       shell: pwsh
       id: get_drive_info
+      env:
+        SHARED_LINK: ${{ github.event.inputs.pve_custom_iso_link }}
       run: |
         Write-Host "=== 获取驱动和文件夹信息 ==="
         
@@ -110,18 +108,19 @@ jobs:
             Write-Host "  - Folder Item ID: $folderItemId"
             Write-Host "  - 文件夹名: $folderName"
             
-            "driveId=$driveId" >> $env:GITHUB_OUTPUT
-            "folderItemId=$folderItemId" >> $env:GITHUB_OUTPUT
-            "folderName=$folderName" >> $env:GITHUB_OUTPUT
+            "driveId=$driveId" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "folderItemId=$folderItemId" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "folderName=$folderName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             
         } catch {
             Write-Error "获取驱动信息失败: $_"
             throw
         }
 
-    # 步骤二：下载文件（独立获取token，完全参考ESXi工作流）
     - name: Download PVE Files
       shell: pwsh
+      env:
+        SHARED_LINK: ${{ github.event.inputs.pve_custom_iso_link }}
       run: |
         Write-Host "=== 下载 PVE 文件 ==="
         
@@ -176,9 +175,8 @@ jobs:
         Write-Host "下载完成: $successCount/$($files.Count) 个文件"
         
         # 设置环境变量
-        "TEMP_DIR=$TEMP_DIR" >> $env:GITHUB_ENV
+        Write-Output "TEMP_DIR=$TEMP_DIR" >> $env:GITHUB_ENV
 
-    # 步骤三：构建自定义 PVE ISO
     - name: Build Custom PVE ISO
       shell: pwsh
       run: |
@@ -301,22 +299,22 @@ fi
             if ($line -match "^PVE_VERSION=(.+)$") {
                 $pveVersion = $matches[1]
                 Write-Host "设置 PVE_VERSION: $pveVersion"
-                "PVE_VERSION=$pveVersion" >> $env:GITHUB_ENV
+                Write-Output "PVE_VERSION=$pveVersion" >> $env:GITHUB_ENV
             }
             elseif ($line -match "^ISO_OUTPUT=(.+)$") {
                 $isoOutput = $matches[1]
                 Write-Host "设置 ISO_OUTPUT: $isoOutput"
-                "ISO_OUTPUT=$isoOutput" >> $env:GITHUB_ENV
+                Write-Output "ISO_OUTPUT=$isoOutput" >> $env:GITHUB_ENV
             }
             elseif ($line -match "^SHA256=(.+)$") {
                 $sha256 = $matches[1]
                 Write-Host "设置 SHA256: $sha256"
-                "SHA256=$sha256" >> $env:GITHUB_ENV
+                Write-Output "SHA256=$sha256" >> $env:GITHUB_ENV
             }
             elseif ($line -match "^ISO_SIZE=(.+)$") {
                 $isoSize = $matches[1]
                 Write-Host "设置 ISO_SIZE: $isoSize"
-                "ISO_SIZE=$isoSize" >> $env:GITHUB_ENV
+                Write-Output "ISO_SIZE=$isoSize" >> $env:GITHUB_ENV
             }
         }
         
@@ -330,15 +328,16 @@ fi
             Write-Host "ISO 大小: $([math]::Round($fileSize, 2)) MB"
             Write-Host ""
             
-            "ISO_PATH=$isoPath" >> $env:GITHUB_ENV
-            "ISO_NAME=$env:ISO_OUTPUT" >> $env:GITHUB_ENV
+            Write-Output "ISO_PATH=$isoPath" >> $env:GITHUB_ENV
+            Write-Output "ISO_NAME=$env:ISO_OUTPUT" >> $env:GITHUB_ENV
         } else {
             throw "ISO 创建失败"
         }
 
-    # 步骤四：快速上传策略（完全使用ESXi工作流的代码）
-    - name: Upload ISO with Idempotent Strategy (Pure)
+    - name: Upload ISO to OneDrive
       shell: pwsh
+      env:
+        SHARED_LINK: ${{ github.event.inputs.pve_custom_iso_link }}
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -348,7 +347,7 @@ fi
         Write-Host "========================================"
         Write-Host ""
         
-        # 1. 获取全新的上传token（每次必须新token）
+        # 1. 获取全新的上传token
         Write-Host "[1/7] 获取全新的上传token..."
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
         $body = @{
@@ -398,7 +397,7 @@ fi
         Write-Host ""
         Write-Host "[3/7] 获取文件夹信息和drive信息..."
         
-        # 获取全新的读取token（与上传token分开）
+        # 获取全新的读取token
         Write-Host "获取全新的读取token用于解析共享链接..."
         $readTokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
         $readToken = ($readTokenResponse.access_token).Trim()
@@ -422,7 +421,6 @@ fi
             Write-Host "  - Drive ID: $driveId"
             Write-Host "  - 文件夹名: $folderName"
             
-            # 确保文件夹名是正确的
             if ([string]::IsNullOrEmpty($folderName)) {
                 $folderName = "PVE-Custom-ISO"
                 Write-Host "⚠️ 使用默认文件夹名: $folderName"
@@ -446,7 +444,7 @@ fi
         Write-Host "  $fileUrl"
         Write-Host ""
         
-        # 5. 幂等操作核心：无条件删除现有文件
+        # 5. 幂等操作：无条件删除现有文件
         Write-Host "[5/7] 执行幂等操作：无条件删除现有文件..."
         
         $uploadHeaders = @{ Authorization = "Bearer $uploadToken" }
@@ -454,15 +452,15 @@ fi
         Write-Host "检查文件是否存在并尝试删除..."
         
         try {
-            # 尝试删除文件（幂等操作：删除不存在文件也返回成功）
+            # 尝试删除文件
             Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method DELETE
             Write-Host "✅ 文件删除成功（或原本不存在）"
             
-            # 等待删除操作完成并验证
+            # 等待删除操作完成
             Write-Host "等待 2 秒确保删除操作完成..."
             Start-Sleep -Seconds 2
             
-            # 可选：验证文件确实被删除（增加稳定性）
+            # 验证文件确实被删除
             Write-Host "验证文件是否确实不存在..."
             try {
                 $checkResponse = Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method GET
@@ -476,16 +474,14 @@ fi
             }
             
         } catch {
-            # 即使删除失败也继续尝试上传（降级处理）
             Write-Host "⚠️ 删除操作异常: $($_.Exception.Message)"
             Write-Host "  将继续尝试上传..."
         }
         
-        # 6. 创建上传会话（使用最简请求体，完全避免replace语义）
+        # 6. 创建上传会话
         Write-Host ""
-        Write-Host "[6/7] 创建上传会话（纯净请求体）..."
+        Write-Host "[6/7] 创建上传会话..."
         
-        # 构建稳定的上传URL（使用root路径格式）
         $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}:/createUploadSession"
         
         Write-Host "使用稳定上传URL:"
@@ -497,9 +493,7 @@ fi
             "Content-Type" = "application/json"
         }
         
-        # 最纯净的请求体：空对象，完全避免replace语义
-        # 根据Microsoft Graph API文档，createUploadSession支持空请求体
-        # 默认冲突行为是"fail"，但由于文件已删除，实际上就是创建新文件
+        # 纯净的请求体
         $bodyJson = @{} | ConvertTo-Json -Compress
         
         Write-Host "请求体（纯净空对象）: $bodyJson"
@@ -517,7 +511,6 @@ fi
             Write-Host ""
             Write-Host "✅ 上传会话创建成功！"
             Write-Host "  - 使用稳定路径: /root:/${encodedFolderName}/${encodedIsoName}:"
-            Write-Host "  - 使用纯净请求体: {}"
             
             # 7. 执行分片上传
             Write-Host ""
@@ -558,7 +551,6 @@ fi
                         $requestStream.Write($buffer, 0, $bytesRead)
                         $requestStream.Close()
                         
-                        # 获取响应，忽略可能的读取错误
                         try {
                             $response = $request.GetResponse()
                             $responseStream = $response.GetResponseStream()
@@ -567,9 +559,7 @@ fi
                             $reader.Close()
                             $responseStream.Close()
                             $response.Close()
-                        } catch {
-                            # 忽略响应读取错误，只要请求成功发送
-                        }
+                        } catch {}
                         
                         $progress = [math]::Round(($rangeEnd + 1) / $fileSize * 100, 2)
                         Write-Host "分片 [$($i+1)/$totalChunks]: ✓ 成功 (进度: ${progress}%)"
@@ -589,7 +579,6 @@ fi
                 
                 $bytesUploaded += $bytesRead
                 
-                # 每上传几个分片后短暂暂停
                 if (($i + 1) % 5 -eq 0) {
                     Start-Sleep -Milliseconds 300
                 }
@@ -603,14 +592,12 @@ fi
             Write-Host "  - 大小: $([math]::Round($fileSize / 1MB, 2)) MB"
             Write-Host "  - 总块数: $totalChunks"
             Write-Host "  - 策略: 检测→删除→验证→上传"
-            Write-Host "  - 请求体: 纯净空对象 {}"
             Write-Host "========================================"
             
         } catch {
             Write-Host ""
             Write-Host "❌ 上传失败: $($_.Exception.Message)"
             
-            # 输出详细错误信息
             if ($_.Exception.Response) {
                 try {
                     $errorStream = $_.Exception.Response.GetResponseStream()
@@ -623,7 +610,6 @@ fi
                     Write-Host "🔴 Graph API 错误响应:"
                     Write-Host $errorBody
                     
-                    # 尝试解析错误详情
                     try {
                         $errorObj = $errorBody | ConvertFrom-Json
                         if ($errorObj.error) {
@@ -632,9 +618,7 @@ fi
                             Write-Host "  代码: $($errorObj.error.code)"
                             Write-Host "  消息: $($errorObj.error.message)"
                         }
-                    } catch {
-                        # 忽略JSON解析错误
-                    }
+                    } catch {}
                 } catch {
                     Write-Host "无法读取错误响应流"
                 }
@@ -666,7 +650,7 @@ fi
         }
         
         if ($foundPath) {
-            "artifact_path=$foundPath" >> $env:GITHUB_OUTPUT
+            Write-Output "artifact_path=$foundPath" >> $env:GITHUB_OUTPUT
         } else {
             Write-Host "⚠️ ISO文件不存在，将跳过Artifact上传"
         }
