@@ -1,0 +1,526 @@
+name: Build PVE ISO with RTL8125 (Cloud Only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: '强制重新构建（即使版本相同）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      proxmox_iso_filename:
+        description: 'Proxmox ISO 文件名（在 OneDrive 中）'
+        required: true
+        default: 'proxmox-ve_9.1-1.iso'
+      r8125_driver_filename:
+        description: 'RTL8125 驱动文件名（在 OneDrive 中）'
+        required: true
+        default: 'realtek-r8125-dkms_9.016.01-1_amd64.deb'
+      pve_custom_iso_link:
+        description: 'OneDrive PVE-Custom-ISO 共享链接'
+        required: true
+        default: 'https://xs9888outlook-my.sharepoint.com/:f:/g/personal/x_xs9888outlook_onmicrosoft_com/IgDbCSpeCVNMS4wp8VLWaZ7PAXUWbl4eKahM-Blf17ZBJT8?e=EEVfKf'
+
+permissions:
+  contents: write
+
+env:
+  OD_CLIENT_ID: ${{ secrets.OD_CLIENT_ID }}
+  OD_CLIENT_SECRET: ${{ secrets.OD_CLIENT_SECRET }}
+  OD_TENANT_ID: ${{ secrets.OD_TENANT_ID }}
+  SHARED_LINK: ${{ github.event.inputs.pve_custom_iso_link }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # =========================
+      # 准备阶段
+      # =========================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xorriso curl file jq
+
+      # =========================
+      # 获取 OneDrive 文件夹信息
+      # =========================
+      - name: Get OneDrive Folder Information
+        id: get_drive_info
+        run: |
+          echo "=== 获取 OneDrive 文件夹信息 ==="
+          
+          # 获取访问令牌
+          tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
+          body=$(cat <<EOF
+client_id=$OD_CLIENT_ID&
+scope=https://graph.microsoft.com/.default&
+client_secret=$OD_CLIENT_SECRET&
+grant_type=client_credentials
+EOF
+          )
+          
+          echo "正在获取访问令牌..."
+          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body" "$tokenUrl")
+          token=$(echo "$tokenResponse" | jq -r '.access_token // empty' | tr -d '\n\r')
+          
+          if [ -z "$token" ]; then
+            echo "❌ 访问令牌获取失败"
+            exit 1
+          fi
+          
+          # 解析共享链接
+          echo "正在解析共享链接..."
+          encodedLink=$(echo -n "$SHARED_LINK" | base64 -w 0 | tr -d '=' | tr '/+' '_-')
+          shareUrl="https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
+          
+          headers="Authorization: Bearer $token"
+          driveItem=$(curl -s -H "$headers" -X GET "$shareUrl")
+          
+          # 提取驱动和文件夹信息
+          driveId=$(echo "$driveItem" | jq -r '.parentReference.driveId // empty')
+          folderName=$(echo "$driveItem" | jq -r '.name // empty')
+          
+          if [ -z "$driveId" ]; then
+            echo "❌ 无法获取 Drive ID"
+            exit 1
+          fi
+          
+          # 清理文件夹名
+          folderName=$(echo "$folderName" | sed 's/%20/ /g')
+          
+          echo "driveId=$driveId" >> $GITHUB_OUTPUT
+          echo "folderName=$folderName" >> $GITHUB_OUTPUT
+          
+          echo "✅ OneDrive 信息获取成功"
+          echo "  - Drive ID: $driveId"
+          echo "  - 文件夹名: $folderName"
+
+      # =========================
+      # 从 OneDrive 下载文件
+      # =========================
+      - name: Download Files from OneDrive
+        run: |
+          echo "=== 从 OneDrive 下载文件 ==="
+          
+          # 获取新的访问令牌
+          tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
+          body=$(cat <<EOF
+client_id=$OD_CLIENT_ID&
+scope=https://graph.microsoft.com/.default&
+client_secret=$OD_CLIENT_SECRET&
+grant_type=client_credentials
+EOF
+          )
+          
+          echo "正在获取下载令牌..."
+          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body" "$tokenUrl")
+          token=$(echo "$tokenResponse" | jq -r '.access_token // empty' | tr -d '\n\r')
+          
+          if [ -z "$token" ]; then
+            echo "❌ 下载令牌获取失败"
+            exit 1
+          fi
+          
+          # 创建下载目录
+          mkdir -p downloads
+          
+          # 下载 Proxmox ISO
+          proxmoxIsoFilename="${{ github.event.inputs.proxmox_iso_filename }}"
+          echo "正在下载: $proxmoxIsoFilename"
+          
+          encodedFilename=$(echo -n "$proxmoxIsoFilename" | jq -sRr @uri)
+          downloadUrl="https://graph.microsoft.com/v1.0/drives/${{ steps.get_drive_info.outputs.driveId }}/root:/${{ steps.get_drive_info.outputs.folderName }}/$encodedFilename:/content"
+          
+          if curl -fL -H "Authorization: Bearer $token" --retry 3 -o "downloads/$proxmoxIsoFilename" "$downloadUrl"; then
+            isoSize=$(stat -c%s "downloads/$proxmoxIsoFilename" 2>/dev/null || echo 0)
+            if [ "$isoSize" -gt 1000000000 ]; then
+              echo "✅ ISO 下载成功: $((isoSize/1024/1024)) MB"
+              echo "ISO_ORIG=downloads/$proxmoxIsoFilename" >> $GITHUB_ENV
+            else
+              echo "❌ ISO 文件过小或损坏"
+              exit 1
+            fi
+          else
+            echo "❌ ISO 下载失败"
+            exit 1
+          fi
+          
+          # 下载 RTL8125 驱动
+          driverFilename="${{ github.event.inputs.r8125_driver_filename }}"
+          echo "正在下载: $driverFilename"
+          
+          encodedFilename=$(echo -n "$driverFilename" | jq -sRr @uri)
+          downloadUrl="https://graph.microsoft.com/v1.0/drives/${{ steps.get_drive_info.outputs.driveId }}/root:/${{ steps.get_drive_info.outputs.folderName }}/$encodedFilename:/content"
+          
+          if curl -fL -H "Authorization: Bearer $token" --retry 3 -o "downloads/$driverFilename" "$downloadUrl"; then
+            driverSize=$(stat -c%s "downloads/$driverFilename" 2>/dev/null || echo 0)
+            if [ "$driverSize" -gt 50000 ]; then
+              echo "✅ 驱动下载成功: $((driverSize/1024)) KB"
+              echo "DRIVER_FILE=downloads/$driverFilename" >> $GITHUB_ENV
+            else
+              echo "❌ 驱动文件过小或损坏"
+              exit 1
+            fi
+          else
+            echo "❌ 驱动下载失败"
+            exit 1
+          fi
+
+      # =========================
+      # 验证 ISO 文件
+      # =========================
+      - name: Verify ISO File
+        run: |
+          echo "=== 验证 ISO 文件 ==="
+          
+          if ! xorriso -indev "$ISO_ORIG" -toc 2>&1 | grep -q "Media summary"; then
+            echo "❌ ISO 文件格式不正确或已损坏"
+            exit 1
+          fi
+          
+          echo "✅ ISO 文件验证通过"
+
+      # =========================
+      # 解析版本信息
+      # =========================
+      - name: Parse Version Information
+        run: |
+          echo "=== 解析版本信息 ==="
+          
+          # 从 ISO 文件名提取 PVE 版本
+          ISO_BASENAME=$(basename "$ISO_ORIG")
+          if [[ "$ISO_BASENAME" =~ proxmox-ve_([0-9]+\.[0-9]+(-[0-9]+)?)\.iso$ ]]; then
+            PVE_VERSION="${BASH_REMATCH[1]}"
+            echo "PVE_VERSION=$PVE_VERSION" >> $GITHUB_ENV
+            echo "ISO_OUTPUT=PVE-${PVE_VERSION}-r8125.iso" >> $GITHUB_ENV
+            
+            # 生成 ISO 卷标
+            ISO_LABEL="PVE-${PVE_VERSION}-R8125"
+            ISO_LABEL=$(echo "$ISO_LABEL" | tr -cd '[:alnum:]_-' | cut -c1-32)
+            echo "ISO_LABEL=$ISO_LABEL" >> $GITHUB_ENV
+            
+            echo "✅ PVE 版本: $PVE_VERSION"
+            echo "✅ 输出文件: $ISO_OUTPUT"
+            echo "✅ 卷标: $ISO_LABEL"
+          else
+            echo "❌ 无法解析 ISO 文件名: $ISO_BASENAME"
+            echo "⚠️  期望格式: proxmox-ve_X.Y-Z.iso"
+            exit 1
+          fi
+          
+          # 从驱动文件名提取驱动版本
+          DRIVER_BASENAME=$(basename "$DRIVER_FILE")
+          if [[ "$DRIVER_BASENAME" =~ realtek-r8125-dkms_([^_]+)_amd64\.deb ]]; then
+            DRIVER_VERSION="${BASH_REMATCH[1]}"
+            echo "DRIVER_VERSION=$DRIVER_VERSION" >> $GITHUB_ENV
+            echo "✅ 驱动版本: $DRIVER_VERSION"
+          else
+            echo "❌ 无法解析驱动文件名: $DRIVER_BASENAME"
+            exit 1
+          fi
+
+      # =========================
+      # 检查是否需要重建
+      # =========================
+      - name: Check Rebuild Requirement
+        id: check_rebuild
+        run: |
+          echo "=== 检查重建需求 ==="
+          
+          SKIP_BUILD=false
+          
+          if [ "${{ github.event.inputs.force_rebuild }}" = "false" ]; then
+            echo "检查现有 GitHub Release..."
+            RELEASE_INFO=$(curl -s \
+              -H "Authorization: token ${{ github.token }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${PVE_VERSION}-r8125")
+            
+            RELEASE_STATUS=$(echo "$RELEASE_INFO" | jq -r '.message // "found"')
+            
+            if [ "$RELEASE_STATUS" != "Not Found" ]; then
+              echo "✅ 版本 pve-${PVE_VERSION}-r8125 已存在"
+              SKIP_BUILD=true
+            else
+              echo "❌ 版本 pve-${PVE_VERSION}-r8125 不存在，需要构建"
+            fi
+          else
+            echo "⚠️  强制重建模式启用"
+          fi
+          
+          echo "skip_build=$SKIP_BUILD" >> $GITHUB_OUTPUT
+
+      # =========================
+      # 构建自定义 ISO
+      # =========================
+      - name: Build Custom ISO
+        if: steps.check_rebuild.outputs.skip_build != 'true'
+        run: |
+          echo "=== 构建自定义 ISO ==="
+          
+          # 清理工作目录
+          rm -rf work
+          mkdir -p work/iso
+          
+          echo "1. 解包原始 ISO..."
+          xorriso -osirrox on -indev "$ISO_ORIG" -extract / work/iso
+          chmod -R +w work/iso
+          
+          echo "2. 添加 RTL8125 驱动..."
+          mkdir -p work/iso/pool/extras
+          cp "$DRIVER_FILE" work/iso/pool/extras/
+          
+          echo "3. 配置自动安装..."
+          PRESEED_FILE="work/iso/preseed.cfg"
+          if [ ! -f "$PRESEED_FILE" ]; then
+            touch "$PRESEED_FILE"
+          fi
+          
+          # 添加 late_command
+          if ! grep -q "r8125" "$PRESEED_FILE" 2>/dev/null; then
+            cat >> "$PRESEED_FILE" << 'EOF'
+# 自动安装 RTL8125 驱动
+d-i preseed/late_command string \
+  in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb || true; \
+  depmod -a; \
+  modprobe r8125 || true"
+EOF
+            echo "✅ 自动安装配置已添加"
+          fi
+          
+          echo "4. 重新打包 ISO..."
+          xorriso -as mkisofs \
+            -r -V "$ISO_LABEL" \
+            -o "$ISO_OUTPUT" \
+            -J -joliet-long \
+            work/iso
+          
+          # 验证生成的 ISO
+          if [ ! -f "$ISO_OUTPUT" ]; then
+            echo "❌ ISO 打包失败"
+            exit 1
+          fi
+          
+          ISO_SIZE=$(stat -c%s "$ISO_OUTPUT")
+          echo "✅ ISO 构建完成"
+          echo "  文件: $ISO_OUTPUT"
+          echo "  大小: $((ISO_SIZE/1024/1024)) MB"
+          
+          # 计算 SHA256
+          sha256sum "$ISO_OUTPUT" > sha256.txt
+          SHA256=$(cut -d' ' -f1 sha256.txt)
+          echo "SHA256=$SHA256" >> $GITHUB_ENV
+          echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
+
+      # =========================
+      # 上传到 OneDrive (幂等策略)
+      # =========================
+      - name: Upload to OneDrive (Idempotent)
+        if: steps.check_rebuild.outputs.skip_build != 'true'
+        run: |
+          echo "=== 上传到 OneDrive (幂等策略) ==="
+          
+          # 获取上传令牌
+          tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
+          body=$(cat <<EOF
+client_id=$OD_CLIENT_ID&
+scope=https://graph.microsoft.com/.default&
+client_secret=$OD_CLIENT_SECRET&
+grant_type=client_credentials
+EOF
+          )
+          
+          echo "获取上传令牌..."
+          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body" "$tokenUrl")
+          uploadToken=$(echo "$tokenResponse" | jq -r '.access_token // empty' | tr -d '\n\r')
+          
+          if [ -z "$uploadToken" ]; then
+            echo "❌ 上传令牌获取失败"
+            exit 1
+          fi
+          
+          # 文件信息
+          isoPath="$ISO_OUTPUT"
+          isoName="$ISO_OUTPUT"
+          fileSize="$ISO_SIZE"
+          folderName="${{ steps.get_drive_info.outputs.folderName }}"
+          driveId="${{ steps.get_drive_info.outputs.driveId }}"
+          
+          echo "文件信息:"
+          echo "  - 文件名: $isoName"
+          echo "  - 大小: $((fileSize/1024/1024)) MB"
+          echo "  - 文件夹: $folderName"
+          
+          # URL 编码
+          encodedFolderName=$(echo -n "$folderName" | jq -sRr @uri)
+          encodedIsoName=$(echo -n "$isoName" | jq -sRr @uri)
+          
+          # 文件 URL
+          fileUrl="https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}"
+          
+          echo ""
+          echo "步骤 1: 删除现有文件 (幂等操作)..."
+          
+          # 尝试删除现有文件
+          if curl -s -X DELETE -H "Authorization: Bearer $uploadToken" "$fileUrl" > /dev/null 2>&1; then
+            echo "✅ 文件删除成功（或原本不存在）"
+          else
+            echo "⚠️  删除操作可能失败，继续上传..."
+          fi
+          
+          sleep 2
+          
+          echo ""
+          echo "步骤 2: 创建上传会话..."
+          
+          # 创建上传会话
+          createUrl="https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}:/createUploadSession"
+          
+          sessionResponse=$(curl -s -X POST \
+            -H "Authorization: Bearer $uploadToken" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            "$createUrl")
+          
+          uploadUrl=$(echo "$sessionResponse" | jq -r '.uploadUrl // empty')
+          
+          if [ -z "$uploadUrl" ]; then
+            echo "❌ 上传会话创建失败"
+            echo "响应: $sessionResponse"
+            exit 1
+          fi
+          
+          echo "✅ 上传会话创建成功"
+          
+          echo ""
+          echo "步骤 3: 分片上传..."
+          
+          # 分片上传参数
+          chunkSize=$((3276800 * 10))  # 31.25 MB
+          totalChunks=$(( (fileSize + chunkSize - 1) / chunkSize ))
+          bytesUploaded=0
+          
+          echo "分片配置:"
+          echo "  - 分片大小: $((chunkSize/1024/1024)) MB"
+          echo "  - 总分片数: $totalChunks"
+          
+          # 执行分片上传
+          for ((chunk=0; chunk<totalChunks; chunk++)); do
+            rangeStart=$bytesUploaded
+            rangeEnd=$((rangeStart + chunkSize - 1))
+            
+            if [ $rangeEnd -ge $fileSize ]; then
+              rangeEnd=$((fileSize - 1))
+            fi
+            
+            chunkSizeActual=$((rangeEnd - rangeStart + 1))
+            rangeHeader="bytes $rangeStart-$rangeEnd/$fileSize"
+            
+            # 上传当前分片（最多重试3次）
+            for ((retry=0; retry<3; retry++)); do
+              if dd if="$isoPath" bs=1 skip=$rangeStart count=$chunkSizeActual 2>/dev/null | \
+                 curl -s -X PUT "$uploadUrl" \
+                   -H "Content-Range: $rangeHeader" \
+                   -H "Content-Type: application/octet-stream" \
+                   --data-binary @- > /dev/null 2>&1; then
+                
+                progress=$(( (rangeEnd + 1) * 100 / fileSize ))
+                echo "分片 $((chunk+1))/$totalChunks: ✓ 完成 ($progress%)"
+                break
+              else
+                if [ $retry -eq 2 ]; then
+                  echo "❌ 分片 $((chunk+1))/$totalChunks 上传失败"
+                  exit 1
+                fi
+                echo "分片 $((chunk+1))/$totalChunks: ⚠️  重试 $((retry+1))/3..."
+                sleep 2
+              fi
+            done
+            
+            bytesUploaded=$((bytesUploaded + chunkSizeActual))
+            
+            # 每5个分片暂停一下
+            if [ $(((chunk+1) % 5)) -eq 0 ]; then
+              sleep 0.3
+            fi
+          done
+          
+          echo ""
+          echo "✅ 文件上传完成"
+          echo "文件已保存到 OneDrive: $folderName/$isoName"
+
+      # =========================
+      # 创建 GitHub Release
+      # =========================
+      - name: Create GitHub Release
+        if: steps.check_rebuild.outputs.skip_build != 'true'
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: pve-${{ env.PVE_VERSION }}-r8125
+          name: PVE ${{ env.PVE_VERSION }} with RTL8125
+          body: |
+            - **PVE 版本**: ${{ env.PVE_VERSION }}
+            - **RTL8125 驱动版本**: ${{ env.DRIVER_VERSION }}
+            - **SHA256**: ${{ env.SHA256 }}
+          files: |
+            ${{ env.ISO_OUTPUT }}
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+
+      # =========================
+      # 上传到 GitHub Artifacts
+      # =========================
+      - name: Upload to GitHub Artifacts
+        if: steps.check_rebuild.outputs.skip_build != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PVE-${{ env.PVE_VERSION }}-R8125-ISO
+          path: ${{ env.ISO_OUTPUT }}
+          retention-days: 7
+          if-no-files-found: error
+
+      # =========================
+      # 显示完成信息
+      # =========================
+      - name: Display Completion Info
+        if: success()
+        run: |
+          echo ""
+          echo "========================================"
+          echo "✅ 构建完成！"
+          echo "========================================"
+          echo ""
+          echo "📦 输出文件: ${{ env.ISO_OUTPUT }}"
+          echo "🏷️  Release Tag: pve-${{ env.PVE_VERSION }}-r8125"
+          echo "💾 Artifact: PVE-${{ env.PVE_VERSION }}-R8125-ISO"
+          echo "☁️  OneDrive: ${{ steps.get_drive_info.outputs.folderName }}/${{ env.ISO_OUTPUT }}"
+          echo ""
+          echo "📋 版本信息:"
+          echo "  - PVE: ${{ env.PVE_VERSION }}"
+          echo "  - RTL8125: ${{ env.DRIVER_VERSION }}"
+          echo "  - SHA256: ${{ env.SHA256 }}"
+          echo "========================================"
+
+      # =========================
+      # 清理临时文件
+      # =========================
+      - name: Cleanup Temporary Files
+        if: always()
+        run: |
+          echo "清理临时文件..."
+          rm -rf work downloads sha256.txt
+          # 保留构建的 ISO 用于 Artifact
+          if [ -f "$ISO_OUTPUT" ]; then
+            echo "保留 ISO 文件: $ISO_OUTPUT"
+          fi
