@@ -14,7 +14,7 @@ on:
       pve_custom_iso_link:
         description: 'OneDrive PVE-Custom-ISO 共享链接'
         required: true
-        default: 'https://xs9888outlook-my.sharepoint.com/my?id=%2Fpersonal%2Fx%5Fxs9888outlook%5Fonmicrosoft%5Fcom%2FDocuments%2FPVE%2DCustom%2DISO&viewid=5f3047b5-37d1-41fc-8f65-d63151c422ca'
+        default: 'https://xs9888outlook-my.sharepoint.com/:f:/g/personal/x_xs9888outlook_onmicrosoft_com/IgDbCSpeCVNMS4wp8VLWaZ7PAXUWbl4eKahM-Blf17ZBJT8?e=EEVfKf'
 
 permissions:
   contents: write
