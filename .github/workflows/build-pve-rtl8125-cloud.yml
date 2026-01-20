@@ -60,7 +60,7 @@ jobs:
           # 获取访问令牌
           tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
           
-          # 构建请求体（不使用 heredoc）
+          # 构建请求体
           body_content="client_id=$OD_CLIENT_ID"
           body_content="$body_content&scope=https://graph.microsoft.com/.default"
           body_content="$body_content&client_secret=$OD_CLIENT_SECRET"
@@ -257,7 +257,7 @@ jobs:
           echo "skip_build=$SKIP_BUILD" >> $GITHUB_OUTPUT
 
       # =========================
-      # 构建自定义 ISO
+      # 构建自定义 ISO（使用echo替代heredoc）
       # =========================
       - name: Build Custom ISO
         if: steps.check_rebuild.outputs.skip_build != 'true'
@@ -282,15 +282,13 @@ jobs:
             touch "$PRESEED_FILE"
           fi
           
-          # 添加 late_command
+          # 添加 late_command（不使用heredoc，使用echo）
           if ! grep -q "r8125" "$PRESEED_FILE" 2>/dev/null; then
-            cat >> "$PRESEED_FILE" << 'PRESEED_EOF'
-# 自动安装 RTL8125 驱动
-d-i preseed/late_command string \
-  in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb || true; \
-  depmod -a; \
-  modprobe r8125 || true"
-PRESEED_EOF
+            echo '# 自动安装 RTL8125 驱动' >> "$PRESEED_FILE"
+            echo 'd-i preseed/late_command string \' >> "$PRESEED_FILE"
+            echo '  in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb || true; \' >> "$PRESEED_FILE"
+            echo '  depmod -a; \' >> "$PRESEED_FILE"
+            echo '  modprobe r8125 || true"' >> "$PRESEED_FILE"
             echo "✅ 自动安装配置已添加"
           fi
           
