@@ -8,7 +8,7 @@ on:
       sub_url:
         description: '机场订阅链接（留空使用默认）'
         required: false
-        default: 'http://dbsub2.whtjdasha.com/s/b6ea7e4e77c3037cc6ffd6de407c04d6'
+        default: ''
       force_update:
         description: '强制覆盖 Gist（即使内容未变化）'
         required: false
@@ -21,37 +21,9 @@ on:
 jobs:
   update-gist:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10  # 增加超时时间
 
     steps:
-      - name: Debug Secrets
-        run: |
-          echo "=== Secrets 调试信息 ==="
-          echo "GIST_ID: '${{ secrets.GIST_ID }}'"
-          echo "GIST_TOKEN 前5字符: '${{ secrets.GIST_TOKEN }}' | head -c 5"
-          
-          # 检查长度
-          GIST_ID="${{ secrets.GIST_ID }}"
-          GIST_TOKEN="${{ secrets.GIST_TOKEN }}"
-          echo "GIST_ID 长度: ${#GIST_ID}"
-          echo "GIST_TOKEN 长度: ${#GIST_TOKEN}"
-          
-          if [ -z "${{ secrets.GIST_ID }}" ]; then
-            echo "❌ 严重错误: GIST_ID 为空！"
-            echo "请在仓库 Settings → Secrets and variables → Actions 中添加 GIST_ID"
-            echo "GIST_ID 应该是 Gist URL 的最后一部分，例如:"
-            echo "Gist URL: https://gist.github.com/timeflysoon/01ca07b016740f76c69939ba4f2084f9"
-            echo "GIST_ID 值: 01ca07b016740f76c69939ba4f2084f9"
-            exit 1
-          fi
-          
-          if [ -z "${{ secrets.GIST_TOKEN }}" ]; then
-            echo "❌ 严重错误: GIST_TOKEN 为空！"
-            exit 1
-          fi
-          
-          echo "✅ Secrets 检查通过"
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -67,12 +39,10 @@ jobs:
 
       - name: Fetch and conditionally update Gist
         env:
-          # 直接使用 secrets，不要中间变量
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           GIST_ID: ${{ secrets.GIST_ID }}
-          DEFAULT_SUB_URL: "http://dbsub2.whtjdasha.com/s/b6ea7e4e77c3037cc6ffd6de407c04d6"
           GIST_FILE: "duobao.yaml"
-
+          
         run: |
           python - << 'EOF'
           import requests
@@ -81,6 +51,7 @@ jobs:
           import sys
           import time
           from datetime import datetime
+          import base64
 
           print("🚀 Gist 自动更新任务开始")
           print("=" * 60)
@@ -88,17 +59,10 @@ jobs:
           # 获取环境变量
           token = os.getenv('GIST_TOKEN')
           gist_id = os.getenv('GIST_ID')
-          default_sub_url = os.getenv('DEFAULT_SUB_URL')
           gist_file = os.getenv('GIST_FILE')
-          
-          # 调试输出
-          print(f"GIST_ID: '{gist_id}'")
-          print(f"GIST_ID 长度: {len(gist_id) if gist_id else 0}")
-          print(f"GIST_TOKEN 长度: {len(token) if token else 0}")
           
           if not gist_id or gist_id.strip() == "":
               print("❌ 致命错误: GIST_ID 为空或未设置")
-              print("请在 GitHub 仓库的 Secrets 中设置 GIST_ID")
               sys.exit(1)
               
           if not token or token.strip() == "":
@@ -109,11 +73,15 @@ jobs:
           sub_url_input = "${{ inputs.sub_url }}" or ""
           force = "${{ inputs.force_update }}" == "true"
 
-          sub_url = sub_url_input.strip() if sub_url_input.strip() else default_sub_url
-          print(f"📡 订阅链接: {sub_url}")
+          # 默认订阅链接列表
+          default_sub_urls = [
+              "http://dbsub2.whtjdasha.com/s/b6ea7e4e77c3037cc6ffd6de407c04d6",
+              "https://raw.githubusercontent.com/freefq/free/master/v2",
+              "https://getafreenode.com/subscribe.php?subtype=1",
+          ]
+
           print(f"⚡ 强制更新: {force}")
           print(f"📄 Gist文件: {gist_file}")
-          print(f"🎯 Gist ID: {gist_id}")
 
           headers = {
               'Authorization': f'token {token}',
@@ -123,35 +91,26 @@ jobs:
           # 1. 获取当前 Gist
           print("\n1. 获取当前Gist内容...")
           gist_url = f"https://api.github.com/gists/{gist_id}"
-          print(f"请求URL: {gist_url}")
           
           try:
               resp = requests.get(gist_url, headers=headers, timeout=10)
-              print(f"响应状态码: {resp.status_code}")
               
               if resp.status_code != 200:
                   print(f"❌ 获取Gist失败: {resp.status_code}")
-                  print(f"错误信息: {resp.text[:200]}")
                   sys.exit(1)
                   
               gist = resp.json()
-          except requests.RequestException as e:
-              print(f"❌ 网络请求异常: {e}")
-              sys.exit(1)
           except Exception as e:
-              print(f"❌ 未知错误: {e}")
+              print(f"❌ 获取Gist时出错: {e}")
               sys.exit(1)
 
           if gist_file not in gist['files']:
               print(f"❌ 错误：Gist中不存在文件 '{gist_file}'")
-              print(f"可用文件: {list(gist['files'].keys())}")
               sys.exit(1)
 
           old_content = gist['files'][gist_file]['content']
           old_hash = hashlib.sha256(old_content.encode('utf-8')).hexdigest()
-          print(f"✅ Gist获取成功")
-          print(f"   文件大小: {len(old_content):,} 字符")
-          print(f"   当前哈希: {old_hash[:12]}...")
+          print(f"✅ Gist获取成功，当前哈希: {old_hash[:12]}...")
 
           # 2. 拉取订阅内容
           print(f"\n2. 拉取订阅内容...")
@@ -159,37 +118,83 @@ jobs:
           def fetch_with_retry(url, max_retries=3):
               for attempt in range(max_retries):
                   try:
-                      print(f"尝试拉取 (第 {attempt + 1}/{max_retries} 次)...")
-                      response = requests.get(url, timeout=30)
+                      print(f"  尝试 {attempt + 1}/{max_retries}...")
+                      
+                      # 添加浏览器请求头
+                      request_headers = {
+                          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                          'Accept': 'text/plain,application/x-yaml,text/yaml,*/*',
+                          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                          'Connection': 'keep-alive',
+                      }
+                      
+                      # 使用会话
+                      session = requests.Session()
+                      session.headers.update(request_headers)
+                      
+                      response = session.get(url, timeout=15, verify=False)
                       response.raise_for_status()
-                      return response.text.strip()
-                  except requests.RequestException as e:
+                      
+                      content = response.text.strip()
+                      if not content:
+                          raise ValueError("返回内容为空")
+                          
+                      print(f"  ✅ 第 {attempt + 1} 次尝试成功")
+                      return content
+                      
+                  except Exception as e:
+                      print(f"  ⚠️ 尝试 {attempt + 1} 失败: {type(e).__name__}")
                       if attempt == max_retries - 1:
-                          print(f"❌ 订阅拉取失败，已重试 {max_retries} 次: {e}")
-                          sys.exit(1)
-                      print(f"⚠️ 尝试 {attempt + 1}/{max_retries} 失败，{2 * (attempt + 1)}秒后重试...")
+                          raise
                       time.sleep(2 * (attempt + 1))
           
-          new_content = fetch_with_retry(sub_url)
-          
-          # 验证内容
           def validate_subscription_content(content):
-              if not content or len(content.strip()) < 100:
+              if not content or len(content.strip()) < 50:
                   return False
               
-              valid_keywords = ['proxies', 'proxy-groups', 'rules', 'server', 'port']
+              # 检查是否为base64编码
+              try:
+                  if len(content) % 4 == 0:
+                      decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
+                      if 'proxies' in decoded.lower() or 'server' in decoded.lower():
+                          print("  ✅ 检测到有效的base64编码Clash配置")
+                          return True
+              except:
+                  pass
+              
+              # 检查明文配置
               content_lower = content.lower()
-              matches = sum(1 for keyword in valid_keywords if keyword in content_lower)
+              keywords = ['proxies:', 'proxy-groups:', 'rules:', 'port:', 'server:']
+              matches = sum(1 for keyword in keywords if keyword in content_lower)
+              
               return matches >= 2
           
-          if not validate_subscription_content(new_content):
-              print("⚠️ 警告：获取的内容可能不是有效的Clash订阅格式")
-              print("继续处理...")
-
+          # 确定要使用的订阅链接
+          if sub_url_input.strip():
+              target_urls = [sub_url_input.strip()]
+          else:
+              target_urls = default_sub_urls
+          
+          new_content = None
+          for i, url in enumerate(target_urls):
+              print(f"\n尝试链接 {i+1}/{len(target_urls)}: {url}")
+              try:
+                  content = fetch_with_retry(url, max_retries=2)
+                  if validate_subscription_content(content):
+                      new_content = content
+                      print(f"✅ 链接 {i+1} 可用")
+                      break
+                  else:
+                      print(f"⚠️ 链接 {i+1} 内容格式无效")
+              except Exception as e:
+                  print(f"❌ 链接 {i+1} 失败: {e}")
+          
+          if not new_content:
+              print("❌ 所有订阅链接均失败，使用当前Gist内容")
+              new_content = old_content
+          
           new_hash = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
-          print(f"✅ 订阅拉取成功")
-          print(f"   文件大小: {len(new_content):,} 字符")
-          print(f"   新内容哈希: {new_hash[:12]}...")
+          print(f"\n新内容哈希: {new_hash[:12]}...")
 
           # 3. 判断是否更新
           print(f"\n3. 检查更新条件...")
@@ -198,8 +203,6 @@ jobs:
                   print("✅ 内容哈希相同，但启用强制更新模式")
               else:
                   print("⏭️  内容未变化，跳过更新")
-                  print("=" * 60)
-                  print("🎉 任务完成，无需更新")
                   sys.exit(0)
           else:
               print(f"🔄 检测到内容变化 (旧: {old_hash[:8]}... 新: {new_hash[:8]}...)")
@@ -222,10 +225,8 @@ jobs:
               update_resp.raise_for_status()
               print("✅ Gist 更新成功！")
               print(f"   Gist链接: https://gist.github.com/{gist_id}")
-          except requests.RequestException as e:
+          except Exception as e:
               print(f"❌ Gist更新失败: {e}")
-              if hasattr(update_resp, 'text'):
-                  print(f"   详细错误: {update_resp.text[:200]}")
               sys.exit(1)
 
           print("=" * 60)
