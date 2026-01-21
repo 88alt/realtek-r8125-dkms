@@ -1,0 +1,185 @@
+name: Auto Update Gist with Airport Subscription
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'  # 每周一 00:00 UTC（北京时间周一 08:00）
+  workflow_dispatch:
+    inputs:
+      sub_url:
+        description: '机场订阅链接（留空使用默认）'
+        required: false
+        default: 'http://dbsub2.whtjdasha.com/s/b6ea7e4e77c3037cc6ffd6de407c04d6'
+      force_update:
+        description: '强制覆盖 Gist（即使内容未变化）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+env:
+  DEFAULT_SUB_URL: "http://dbsub2.whtjdasha.com/s/b6ea7e4e77c3037cc6ffd6de407c04d6"
+  GIST_FILE: "duobao.yaml"
+
+jobs:
+  update-gist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5  # 添加超时设置
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pyyaml
+
+      - name: Fetch and conditionally update Gist
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+        run: |
+          python - << 'EOF'
+          import requests
+          import hashlib
+          import os
+          import sys
+          import time
+          from datetime import datetime
+
+          def fetch_with_retry(url, max_retries=3):
+              for attempt in range(max_retries):
+                  try:
+                      print(f"尝试获取订阅内容 (尝试 {attempt + 1}/{max_retries})...")
+                      response = requests.get(url, timeout=30)
+                      response.raise_for_status()
+                      return response.text
+                  except requests.RequestException as e:
+                      if attempt == max_retries - 1:
+                          raise
+                      wait_time = 2 * (attempt + 1)
+                      print(f"请求失败: {e}，等待 {wait_time} 秒后重试...")
+                      time.sleep(wait_time)
+
+          def validate_subscription_content(content):
+              """验证内容是否看起来像有效的订阅配置"""
+              if not content or len(content.strip()) < 10:
+                  return False
+              
+              content_lower = content.lower()
+              # 检查常见订阅配置关键词
+              valid_patterns = ['proxies', 'proxy-groups', 'proxy-group', 'rules', 'server', 'port']
+              return any(pattern in content_lower for pattern in valid_patterns)
+
+          # 环境变量
+          token = os.getenv('GIST_TOKEN')
+          gist_id = os.getenv('GIST_ID')
+          default_sub_url = os.getenv('DEFAULT_SUB_URL', 'http://dbsub2.whtjdasha.com/s/b6ea7e4e77c3037cc6ffd6de407c04d6')
+          gist_file = os.getenv('GIST_FILE', 'duobao.yaml')
+
+          # 从 workflow_dispatch 输入获取
+          sub_url_input = "${{ inputs.sub_url }}" or ""
+          force = "${{ inputs.force_update }}" == "true"
+
+          # 最终订阅 URL
+          sub_url = sub_url_input.strip() if sub_url_input.strip() else default_sub_url
+          print(f"=== Gist 更新任务开始 ===")
+          print(f"执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+          print(f"使用订阅链接: {sub_url}")
+          print(f"强制更新: {force}")
+          print(f"目标Gist文件: {gist_file}")
+
+          headers = {
+              'Authorization': f'token {token}',
+              'Accept': 'application/vnd.github.v3+json'
+          }
+
+          # 获取当前 Gist 内容
+          print("\n1. 获取当前Gist内容...")
+          gist_url = f"https://api.github.com/gists/{gist_id}"
+          try:
+              resp = requests.get(gist_url, headers=headers, timeout=10)
+              resp.raise_for_status()
+              gist = resp.json()
+          except requests.RequestException as e:
+              print(f"❌ 获取Gist失败: {e}")
+              if resp.status_code == 404:
+                  print("错误：Gist不存在或GIST_ID错误")
+              elif resp.status_code == 401:
+                  print("错误：GIST_TOKEN无效或已过期")
+              sys.exit(1)
+
+          if gist_file not in gist['files']:
+              print(f"❌ 错误：Gist中不存在文件 '{gist_file}'")
+              print(f"可用文件: {list(gist['files'].keys())}")
+              sys.exit(1)
+
+          old_content = gist['files'][gist_file]['content']
+          old_hash = hashlib.sha256(old_content.encode('utf-8')).hexdigest()
+          print(f"✓ 当前Gist内容获取成功")
+          print(f"  文件大小: {len(old_content)} 字符")
+          print(f"  内容哈希: {old_hash[:16]}...")
+
+          # 拉取机场订阅
+          print("\n2. 拉取订阅内容...")
+          try:
+              new_content = fetch_with_retry(sub_url)
+              new_content = new_content.strip()
+          except requests.RequestException as e:
+              print(f"❌ 订阅拉取失败: {e}")
+              sys.exit(1)
+
+          # 验证内容
+          if not validate_subscription_content(new_content):
+              print("⚠️ 警告：获取的内容可能不是有效的订阅配置")
+              print("继续处理...")
+
+          new_hash = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
+          print(f"✓ 订阅内容拉取成功")
+          print(f"  文件大小: {len(new_content)} 字符")
+          print(f"  内容哈希: {new_hash[:16]}...")
+
+          # 判断是否需要更新
+          print("\n3. 检查更新条件...")
+          if new_hash == old_hash:
+              if force:
+                  print("✓ 内容未变化，但启用强制更新")
+              else:
+                  print("✓ 内容未变化，跳过更新")
+                  print("=== 任务完成，无需更新 ===")
+                  sys.exit(0)
+          else:
+              print("✓ 检测到内容变化，需要更新")
+
+          # 更新 Gist
+          print("\n4. 更新Gist...")
+          update_payload = {
+              "description": f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+              "files": {
+                  gist_file: {
+                      "filename": gist_file,
+                      "content": new_content
+                  }
+              }
+          }
+
+          try:
+              update_resp = requests.patch(gist_url, headers=headers, json=update_payload, timeout=10)
+              update_resp.raise_for_status()
+              print("✅ Gist 更新成功！")
+              print(f"  更新后Gist: https://gist.github.com/{gist_id}")
+          except requests.RequestException as e:
+              print(f"❌ Gist更新失败: {e}")
+              print(f"  状态码: {update_resp.status_code}")
+              print(f"  响应: {update_resp.text[:200]}")
+              sys.exit(1)
+
+          print("\n=== 任务完成 ===")
+          EOF
