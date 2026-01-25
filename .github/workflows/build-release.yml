@@ -86,7 +86,6 @@ jobs:
       env:
         CUR_VERSION: ${{ steps.vars.outputs.version }}
       run: |
-        # 设置变量
         DEB_NAME="realtek-r8125-dkms"
         RELEASE="1"
         ARCH="amd64"
@@ -106,12 +105,12 @@ jobs:
         mkdir -p "$PKGDIR/DEBIAN"
         
         # 1. 创建control文件
-        cat > "$PKGDIR/DEBIAN/control" <<CONTROL_EOF
-Package: $DEB_NAME
-Version: $FULL_VERSION
+        cat > "$PKGDIR/DEBIAN/control" << 'EOF'
+Package: realtek-r8125-dkms
+Version: REPLACE_FULL_VERSION
 Section: kernel
 Priority: optional
-Architecture: $ARCH
+Architecture: amd64
 Maintainer: GitHub Actions <actions@github.com>
 Depends: dkms, build-essential
 Provides: r8125-dkms
@@ -120,21 +119,26 @@ Description: Realtek RTL8125 2.5G Ethernet DKMS driver
  DKMS driver for Realtek RTL8125 2.5G Ethernet cards.
  Supports kernel up to 6.12.
  Compatible with Proxmox VE 8.x / 9.x.
- Built from Realtek official driver v$CUR_VERSION.
- Source: ${{ env.MANUAL_BACKUP_URL }}
-CONTROL_EOF
+ Built from Realtek official driver vREPLACE_VERSION.
+ Source: REPLACE_DL_URL
+EOF
+        
+        sed -i "s/REPLACE_FULL_VERSION/$FULL_VERSION/g" "$PKGDIR/DEBIAN/control"
+        sed -i "s/REPLACE_VERSION/$CUR_VERSION/g" "$PKGDIR/DEBIAN/control"
+        sed -i "s|REPLACE_DL_URL|${{ env.MANUAL_BACKUP_URL }}|g" "$PKGDIR/DEBIAN/control"
         
         # 2. 创建DKMS目录和配置文件
         mkdir -p "$PKGDIR/usr/src/r8125-$CUR_VERSION"
-        cat > "$PKGDIR/usr/src/r8125-$CUR_VERSION/dkms.conf" <<DKMS_EOF
+        cat > "$PKGDIR/usr/src/r8125-$CUR_VERSION/dkms.conf" << 'EOF'
 PACKAGE_NAME="r8125"
-PACKAGE_VERSION="$CUR_VERSION"
+PACKAGE_VERSION="REPLACE_VERSION"
 BUILT_MODULE_NAME[0]="r8125"
 DEST_MODULE_LOCATION[0]="/updates/dkms"
 AUTOINSTALL="yes"
-MAKE[0]="make -C src KVER=\${kernelver} -j\$(nproc)"
+MAKE[0]="make -C src KVER=${kernelver} -j$(nproc)"
 CLEAN="make -C src clean"
-DKMS_EOF
+EOF
+        sed -i "s/REPLACE_VERSION/$CUR_VERSION/g" "$PKGDIR/usr/src/r8125-$CUR_VERSION/dkms.conf"
         
         # 3. 复制驱动源码
         echo "复制驱动源码从: $DRIVER_SRC"
@@ -159,81 +163,91 @@ DKMS_EOF
         
         # 4. 创建黑名单配置
         mkdir -p "$PKGDIR/etc/modprobe.d"
-        cat > "$PKGDIR/etc/modprobe.d/r8125-blacklist.conf" <<BLACKLIST_EOF
+        cat > "$PKGDIR/etc/modprobe.d/r8125-blacklist.conf" << 'EOF'
 # 禁用原生 r8169 驱动，使用 r8125 驱动
 blacklist r8169
-BLACKLIST_EOF
+EOF
         
-        # 5. 生成postinst脚本（使用简单的echo方式避免复杂的Heredoc问题）
-        echo '#!/bin/sh' > "$PKGDIR/DEBIAN/postinst"
-        echo 'set -e' >> "$PKGDIR/DEBIAN/postinst"
-        echo 'MODULE="r8125"' >> "$PKGDIR/DEBIAN/postinst"
-        echo 'VERSION="$VERSION"' >> "$PKGDIR/DEBIAN/postinst"
-        echo 'case "$1" in' >> "$PKGDIR/DEBIAN/postinst"
-        echo '    configure)' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        echo "配置 DKMS 模块: $MODULE/$VERSION"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        if ! command -v dkms >/dev/null 2>&1; then' >> "$PKGDIR/DEBIAN/postinst"
-        echo '            echo "错误: dkms 未安装"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '            exit 1' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        fi' >> "$PKGDIR/DEBIAN/postinst"
-        echo '' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        if ! ls /usr/src/linux-headers-* >/dev/null 2>&1; then' >> "$PKGDIR/DEBIAN/postinst"
-        echo '            echo "警告: 未检测到任何内核头文件"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '            echo "DKMS 将在内核头文件安装后自动构建"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        fi' >> "$PKGDIR/DEBIAN/postinst"
-        echo '' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        if ! dkms status | grep -q "^$MODULE/$VERSION"; then' >> "$PKGDIR/DEBIAN/postinst"
-        echo '            dkms add -m "$MODULE" -v "$VERSION" || true' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        fi' >> "$PKGDIR/DEBIAN/postinst"
-        echo '' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        dkms build -m "$MODULE" -v "$VERSION" || {' >> "$PKGDIR/DEBIAN/postinst"
-        echo '            echo "构建失败，请检查:"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '            echo "  /var/lib/dkms/$MODULE/$VERSION/build/make.log"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '            exit 1' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        }' >> "$PKGDIR/DEBIAN/postinst"
-        echo '' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        dkms install -m "$MODULE" -v "$VERSION"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        # 更新 initramfs（确保启动时加载新驱动）' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        if command -v update-initramfs >/dev/null 2>&1; then' >> "$PKGDIR/DEBIAN/postinst"
-        echo '            echo "更新 initramfs..."' >> "$PKGDIR/DEBIAN/postinst"
-        echo '            update-initramfs -u' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        else' >> "$PKGDIR/DEBIAN/postinst"
-        echo '            echo "警告: 未找到 update-initramfs 命令，跳过 initramfs 更新"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        fi' >> "$PKGDIR/DEBIAN/postinst"
-        echo '' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        echo "DKMS 模块已安装完成"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        echo "黑名单配置已生效：原生 r8169 驱动将被禁用"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        echo "如需立即使用，可手动执行:"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        echo "  modprobe $MODULE"' >> "$PKGDIR/DEBIAN/postinst"
-        echo '        ;;' >> "$PKGDIR/DEBIAN/postinst"
-        echo 'esac' >> "$PKGDIR/DEBIAN/postinst"
-        echo 'exit 0' >> "$PKGDIR/DEBIAN/postinst"
+        # 5. 生成postinst脚本（使用简单的模板+sed替换）
+        cat > "$PKGDIR/DEBIAN/postinst" << 'POSTINSTEOF'
+#!/bin/sh
+set -e
+
+MODULE="r8125"
+VERSION="REPLACE_VERSION"
+
+case "$1" in
+    configure)
+        echo "配置 DKMS 模块: $MODULE/$VERSION"
+
+        if ! command -v dkms >/dev/null 2>&1; then
+            echo "错误: dkms 未安装"
+            exit 1
+        fi
+
+        if ! ls /usr/src/linux-headers-* >/dev/null 2>&1; then
+            echo "警告: 未检测到任何内核头文件"
+            echo "DKMS 将在内核头文件安装后自动构建"
+        fi
+
+        if ! dkms status | grep -q "^$MODULE/$VERSION"; then
+            dkms add -m "$MODULE" -v "$VERSION" || true
+        fi
+
+        dkms build -m "$MODULE" -v "$VERSION" || {
+            echo "构建失败，请检查:"
+            echo "  /var/lib/dkms/$MODULE/$VERSION/build/make.log"
+            exit 1
+        }
+
+        dkms install -m "$MODULE" -v "$VERSION"
+
+        # 更新 initramfs（确保启动时加载新驱动）
+        if command -v update-initramfs >/dev/null 2>&1; then
+            echo "更新 initramfs..."
+            update-initramfs -u
+        else
+            echo "警告: 未找到 update-initramfs 命令，跳过 initramfs 更新"
+        fi
+
+        echo "DKMS 模块已安装完成"
+        echo "黑名单配置已生效：原生 r8169 驱动将被禁用"
+        echo "如需立即使用，可手动执行:"
+        echo "  modprobe $MODULE"
+        ;;
+esac
+
+exit 0
+POSTINSTEOF
         
         # 替换版本变量
-        sed -i "s/\$VERSION/$CUR_VERSION/g" "$PKGDIR/DEBIAN/postinst"
+        sed -i "s/REPLACE_VERSION/$CUR_VERSION/g" "$PKGDIR/DEBIAN/postinst"
         
         # 6. 生成prerm脚本
-        echo '#!/bin/sh' > "$PKGDIR/DEBIAN/prerm"
-        echo 'set -e' >> "$PKGDIR/DEBIAN/prerm"
-        echo 'MODULE="r8125"' >> "$PKGDIR/DEBIAN/prerm"
-        echo 'VERSION="$VERSION"' >> "$PKGDIR/DEBIAN/prerm"
-        echo 'case "$1" in' >> "$PKGDIR/DEBIAN/prerm"
-        echo '    remove|deconfigure)' >> "$PKGDIR/DEBIAN/prerm"
-        echo '        if lsmod | grep -q "^$MODULE"; then' >> "$PKGDIR/DEBIAN/prerm"
-        echo '            modprobe -r "$MODULE" || true' >> "$PKGDIR/DEBIAN/prerm"
-        echo '        fi' >> "$PKGDIR/DEBIAN/prerm"
-        echo '' >> "$PKGDIR/DEBIAN/prerm"
-        echo '        if dkms status | grep -q "^$MODULE/$VERSION"; then' >> "$PKGDIR/DEBIAN/prerm"
-        echo '            dkms remove -m "$MODULE" -v "$VERSION" --all || true' >> "$PKGDIR/DEBIAN/prerm"
-        echo '        fi' >> "$PKGDIR/DEBIAN/prerm"
-        echo '        ;;' >> "$PKGDIR/DEBIAN/prerm"
-        echo 'esac' >> "$PKGDIR/DEBIAN/prerm"
-        echo 'exit 0' >> "$PKGDIR/DEBIAN/prerm"
+        cat > "$PKGDIR/DEBIAN/prerm" << 'PRERMEOF'
+#!/bin/sh
+set -e
+
+MODULE="r8125"
+VERSION="REPLACE_VERSION"
+
+case "$1" in
+    remove|deconfigure)
+        if lsmod | grep -q "^$MODULE"; then
+            modprobe -r "$MODULE" || true
+        fi
+
+        if dkms status | grep -q "^$MODULE/$VERSION"; then
+            dkms remove -m "$MODULE" -v "$VERSION" --all || true
+        fi
+        ;;
+esac
+
+exit 0
+PRERMEOF
         
         # 替换版本变量
-        sed -i "s/\$VERSION/$CUR_VERSION/g" "$PKGDIR/DEBIAN/prerm"
+        sed -i "s/REPLACE_VERSION/$CUR_VERSION/g" "$PKGDIR/DEBIAN/prerm"
         
         # 7. 设置权限
         chmod 0755 "$PKGDIR/DEBIAN"
