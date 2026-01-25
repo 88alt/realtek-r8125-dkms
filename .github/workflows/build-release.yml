@@ -65,7 +65,6 @@ jobs:
         cd "$WORKDIR"
         wget -O driver.tar.bz2 "$DOWNLOAD_URL" || {
           echo "下载失败，使用备用方案"
-          # 这里可以添加备用下载逻辑
           exit 1
         }
         
@@ -73,7 +72,7 @@ jobs:
         tar -xjf driver.tar.bz2
         
         # 查找驱动目录
-        DRIVER_DIR=$(find . -name "r8125*" -type d | head -1)
+        DRIVER_DIR=$(find . -maxdepth 1 -name "r8125*" -type d | head -1)
         if [ -z "$DRIVER_DIR" ]; then
           DRIVER_DIR="."
         fi
@@ -101,99 +100,187 @@ jobs:
         rm -rf "$WORKDIR"
         mkdir -p "$WORKDIR"
         
-        # 创建目录结构
-        mkdir -p "$WORKDIR/DEBIAN"
-        mkdir -p "$WORKDIR/usr/src/r8125-$VERSION"
+        # ============================================
+        # 创建包目录结构
+        # ============================================
+        PKGDIR="$WORKDIR/$DEB_NAME-$FULL_VERSION"
+        rm -rf "$PKGDIR"
+        mkdir -p "$PKGDIR/DEBIAN"
         
-        # 复制驱动源码
-        echo "Copying driver source from: $DRIVER_SRC"
-        cp -r "$DRIVER_SRC"/* "$WORKDIR/usr/src/r8125-$VERSION/" 2>/dev/null || true
+        # 创建control文件（优化：移除头文件依赖）
+        cat > "$PKGDIR/DEBIAN/control" <<EOF
+Package: $DEB_NAME
+Version: $FULL_VERSION
+Section: kernel
+Priority: optional
+Architecture: $ARCH
+Maintainer: GitHub Actions <actions@github.com>
+Depends: dkms, build-essential
+Provides: r8125-dkms
+Conflicts: r8125-dkms
+Description: Realtek RTL8125 2.5G Ethernet DKMS driver
+ DKMS driver for Realtek RTL8125 2.5G Ethernet cards.
+ Supports kernel up to 6.12.
+ Compatible with Proxmox VE 8.x / 9.x.
+ Built from Realtek official driver v$VERSION.
+ Source: ${{ env.MANUAL_BACKUP_URL }}
+EOF
         
-        # 如果复制失败，创建基本结构
-        if [ ! -f "$WORKDIR/usr/src/r8125-$VERSION/src/Makefile" ]; then
-          mkdir -p "$WORKDIR/usr/src/r8125-$VERSION/src"
-          echo 'obj-m += r8125.o' > "$WORKDIR/usr/src/r8125-$VERSION/src/Makefile"
-          echo 'r8125-objs := r8125_n.o r8125_n.o' >> "$WORKDIR/usr/src/r8125-$VERSION/src/Makefile"
-          touch "$WORKDIR/usr/src/r8125-$VERSION/src/r8125_n.c"
+        # 创建DKMS目录
+        mkdir -p "$PKGDIR/usr/src/r8125-$VERSION"
+        
+        # 创建dkms.conf（优化：多核编译）
+        cat > "$PKGDIR/usr/src/r8125-$VERSION/dkms.conf" <<EOF
+PACKAGE_NAME="r8125"
+PACKAGE_VERSION="$VERSION"
+BUILT_MODULE_NAME[0]="r8125"
+DEST_MODULE_LOCATION[0]="/updates/dkms"
+AUTOINSTALL="yes"
+MAKE[0]="make -C src KVER=\${kernelver} -j\$(nproc)"
+CLEAN="make -C src clean"
+EOF
+        
+        # 复制驱动源码到正确的目录结构
+        echo "复制驱动源码从: $DRIVER_SRC"
+        mkdir -p "$PKGDIR/usr/src/r8125-$VERSION/src"
+        
+        # 检查驱动源码结构并复制
+        if [ -d "$DRIVER_SRC/src" ]; then
+          # 标准Realtek结构
+          echo "检测到标准Realtek源码结构"
+          cp -r "$DRIVER_SRC/src/"* "$PKGDIR/usr/src/r8125-$VERSION/src/"
+        else
+          # 非标准结构，尝试复制所有文件
+          echo "检测到非标准源码结构，尝试直接复制"
+          cp -r "$DRIVER_SRC/"* "$PKGDIR/usr/src/r8125-$VERSION/src/" 2>/dev/null || true
         fi
         
-        # 创建control文件
-        echo "Package: $DEB_NAME" > "$WORKDIR/DEBIAN/control"
-        echo "Version: $FULL_VERSION" >> "$WORKDIR/DEBIAN/control"
-        echo "Section: kernel" >> "$WORKDIR/DEBIAN/control"
-        echo "Priority: optional" >> "$WORKDIR/DEBIAN/control"
-        echo "Architecture: $ARCH" >> "$WORKDIR/DEBIAN/control"
-        echo "Maintainer: GitHub Actions <actions@github.com>" >> "$WORKDIR/DEBIAN/control"
-        echo "Depends: dkms, build-essential, linux-headers-amd64 | linux-headers" >> "$WORKDIR/DEBIAN/control"
-        echo "Provides: r8125-dkms" >> "$WORKDIR/DEBIAN/control"
-        echo "Conflicts: r8125-dkms" >> "$WORKDIR/DEBIAN/control"
-        echo "Description: Realtek RTL8125 2.5G Ethernet DKMS driver" >> "$WORKDIR/DEBIAN/control"
-        echo " DKMS driver for Realtek RTL8125 2.5G Ethernet cards." >> "$WORKDIR/DEBIAN/control"
-        echo " Supports kernel up to 6.12." >> "$WORKDIR/DEBIAN/control"
-        echo " Built from Realtek official driver v$VERSION." >> "$WORKDIR/DEBIAN/control"
-        echo " Source: ${{ env.MANUAL_BACKUP_URL }}" >> "$WORKDIR/DEBIAN/control"
+        # 关键文件校验
+        if [ ! -f "$PKGDIR/usr/src/r8125-$VERSION/src/Makefile" ]; then
+          echo "错误: 复制后未找到Makefile文件"
+          echo "DRIVER_SRC目录内容:"
+          ls -la "$DRIVER_SRC/" 2>/dev/null || echo "无法列出目录"
+          echo "复制的目标目录内容:"
+          ls -la "$PKGDIR/usr/src/r8125-$VERSION/src/" 2>/dev/null || echo "无法列出目录"
+          exit 1
+        fi
         
-        # 创建dkms.conf
-        echo 'PACKAGE_NAME="r8125"' > "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
-        echo "PACKAGE_VERSION=\"$VERSION\"" >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
-        echo 'BUILT_MODULE_NAME[0]="r8125"' >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
-        echo 'DEST_MODULE_LOCATION[0]="/updates/dkms"' >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
-        echo 'AUTOINSTALL="yes"' >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
-        echo 'MAKE[0]="make -C src KVER=${kernelver}"' >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
-        echo 'CLEAN="make -C src clean"' >> "$WORKDIR/usr/src/r8125-$VERSION/dkms.conf"
+        echo "源码复制成功，找到的文件:"
+        find "$PKGDIR/usr/src/r8125-$VERSION/src" -type f -name "*.c" -o -name "*.h" -o -name "Makefile" | head -10
         
-        # 创建postinst脚本
-        echo '#!/bin/sh' > "$WORKDIR/DEBIAN/postinst"
-        echo 'set -e' >> "$WORKDIR/DEBIAN/postinst"
-        echo "MODULE=\"r8125\"" >> "$WORKDIR/DEBIAN/postinst"
-        echo "VERSION=\"$VERSION\"" >> "$WORKDIR/DEBIAN/postinst"
-        echo 'case "$1" in' >> "$WORKDIR/DEBIAN/postinst"
-        echo 'configure)' >> "$WORKDIR/DEBIAN/postinst"
-        echo '  echo "Setting up DKMS module: $MODULE/$VERSION"' >> "$WORKDIR/DEBIAN/postinst"
-        echo '  if ! command -v dkms >/dev/null 2>&1; then' >> "$WORKDIR/DEBIAN/postinst"
-        echo '    echo "Error: dkms not installed"' >> "$WORKDIR/DEBIAN/postinst"
-        echo '    exit 1' >> "$WORKDIR/DEBIAN/postinst"
-        echo '  fi' >> "$WORKDIR/DEBIAN/postinst"
-        echo '  if ! dkms status | grep -q "^$MODULE/$VERSION"; then' >> "$WORKDIR/DEBIAN/postinst"
-        echo '    dkms add -m "$MODULE" -v "$VERSION" || true' >> "$WORKDIR/DEBIAN/postinst"
-        echo '  fi' >> "$WORKDIR/DEBIAN/postinst"
-        echo '  dkms build -m "$MODULE" -v "$VERSION" || {' >> "$WORKDIR/DEBIAN/postinst"
-        echo '    echo "Build failed, check:"' >> "$WORKDIR/DEBIAN/postinst"
-        echo '    echo "  /var/lib/dkms/$MODULE/$VERSION/build/make.log"' >> "$WORKDIR/DEBIAN/postinst"
-        echo '    exit 1' >> "$WORKDIR/DEBIAN/postinst"
-        echo '  }' >> "$WORKDIR/DEBIAN/postinst"
-        echo '  dkms install -m "$MODULE" -v "$VERSION"' >> "$WORKDIR/DEBIAN/postinst"
-        echo '  echo "DKMS module installed"' >> "$WORKDIR/DEBIAN/postinst"
-        echo '  ;;' >> "$WORKDIR/DEBIAN/postinst"
-        echo 'esac' >> "$WORKDIR/DEBIAN/postinst"
-        echo 'exit 0' >> "$WORKDIR/DEBIAN/postinst"
+        # ============================================
+        # 黑名单配置（防止 r8169 冲突）
+        # ============================================
+        mkdir -p "$PKGDIR/etc/modprobe.d"
+        cat > "$PKGDIR/etc/modprobe.d/r8125-blacklist.conf" <<EOF
+# 禁用原生 r8169 驱动，使用 r8125 驱动
+blacklist r8169
+EOF
         
-        # 创建prerm脚本
-        echo '#!/bin/sh' > "$WORKDIR/DEBIAN/prerm"
-        echo 'set -e' >> "$WORKDIR/DEBIAN/prerm"
-        echo "MODULE=\"r8125\"" >> "$WORKDIR/DEBIAN/prerm"
-        echo "VERSION=\"$VERSION\"" >> "$WORKDIR/DEBIAN/prerm"
-        echo 'case "$1" in' >> "$WORKDIR/DEBIAN/prerm"
-        echo 'remove|deconfigure)' >> "$WORKDIR/DEBIAN/prerm"
-        echo '  if lsmod | grep -q "^$MODULE"; then' >> "$WORKDIR/DEBIAN/prerm"
-        echo '    modprobe -r "$MODULE" || true' >> "$WORKDIR/DEBIAN/prerm"
-        echo '  fi' >> "$WORKDIR/DEBIAN/prerm"
-        echo '  if dkms status | grep -q "^$MODULE/$VERSION"; then' >> "$WORKDIR/DEBIAN/prerm"
-        echo '    dkms remove -m "$MODULE" -v "$VERSION" --all || true' >> "$WORKDIR/DEBIAN/prerm"
-        echo '  fi' >> "$WORKDIR/DEBIAN/prerm"
-        echo '  ;;' >> "$WORKDIR/DEBIAN/prerm"
-        echo 'esac' >> "$WORKDIR/DEBIAN/prerm"
-        echo 'exit 0' >> "$WORKDIR/DEBIAN/prerm"
+        # ============================================
+        # postinst脚本（增加initramfs更新）
+        # ============================================
+        cat > "$PKGDIR/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+
+MODULE="r8125"
+VERSION="$VERSION"
+
+case "$1" in
+    configure)
+        echo "配置 DKMS 模块: $MODULE/$VERSION"
+
+        if ! command -v dkms >/dev/null 2>&1; then
+            echo "错误: dkms 未安装"
+            exit 1
+        fi
+
+        if ! ls /usr/src/linux-headers-* >/dev/null 2>&1; then
+            echo "警告: 未检测到任何内核头文件"
+            echo "DKMS 将在内核头文件安装后自动构建"
+        fi
+
+        if ! dkms status | grep -q "^$MODULE/$VERSION"; then
+            dkms add -m "$MODULE" -v "$VERSION" || true
+        fi
+
+        dkms build -m "$MODULE" -v "$VERSION" || {
+            echo "构建失败，请检查:"
+            echo "  /var/lib/dkms/$MODULE/$VERSION/build/make.log"
+            exit 1
+        }
+
+        dkms install -m "$MODULE" -v "$VERSION"
+
+        # 更新 initramfs（确保启动时加载新驱动）
+        if command -v update-initramfs >/dev/null 2>&1; then
+            echo "更新 initramfs..."
+            update-initramfs -u
+        else
+            echo "警告: 未找到 update-initramfs 命令，跳过 initramfs 更新"
+        fi
+
+        echo "DKMS 模块已安装完成"
+        echo "黑名单配置已生效：原生 r8169 驱动将被禁用"
+        echo "如需立即使用，可手动执行:"
+        echo "  modprobe $MODULE"
+        ;;
+esac
+
+exit 0
+EOF
         
-        # 设置权限
-        chmod 0755 "$WORKDIR/DEBIAN"
-        chmod 0755 "$WORKDIR/DEBIAN/postinst"
-        chmod 0755 "$WORKDIR/DEBIAN/prerm"
-        chmod 0644 "$WORKDIR/DEBIAN/control"
+        # ============================================
+        # prerm脚本
+        # ============================================
+        cat > "$PKGDIR/DEBIAN/prerm" <<'EOF'
+#!/bin/sh
+set -e
+
+MODULE="r8125"
+VERSION="$VERSION"
+
+case "$1" in
+    remove|deconfigure)
+        if lsmod | grep -q "^$MODULE"; then
+            modprobe -r "$MODULE" || true
+        fi
+
+        if dkms status | grep -q "^$MODULE/$VERSION"; then
+            dkms remove -m "$MODULE" -v "$VERSION" --all || true
+        fi
+        ;;
+esac
+
+exit 0
+EOF
         
-        # 构建deb包
+        # ============================================
+        # 设置权限（显式设置，避免权限问题）
+        # ============================================
+        chmod 0755 "$PKGDIR/DEBIAN"
+        chmod 0755 "$PKGDIR/DEBIAN/postinst"
+        chmod 0755 "$PKGDIR/DEBIAN/prerm"
+        chmod 0644 "$PKGDIR/DEBIAN/control"
+        chmod 0644 "$PKGDIR/etc/modprobe.d/r8125-blacklist.conf"
+        
+        find "$PKGDIR/usr/src/r8125-$VERSION" -type d -exec chmod 0755 {} \;
+        find "$PKGDIR/usr/src/r8125-$VERSION" -type f -exec chmod 0644 {} \;
+        
+        # ============================================
+        # 构建.deb包
+        # ============================================
         cd "$WORKDIR"
-        dpkg-deb --build . "$GITHUB_WORKSPACE/$DEB_FILE"
+        dpkg-deb --build "$DEB_NAME-$FULL_VERSION"
+        
+        # 验证生成的deb包
+        if [ ! -f "$DEB_NAME-$FULL_VERSION.deb" ]; then
+            echo "错误: 构建失败，未生成.deb文件"
+            exit 1
+        fi
+        
+        mv "$DEB_NAME-$FULL_VERSION.deb" "$GITHUB_WORKSPACE/$DEB_FILE"
         
         # 输出文件路径
         echo "deb_file=$DEB_FILE" >> $GITHUB_OUTPUT
@@ -216,5 +303,48 @@ jobs:
         name: Realtek R8125 DKMS v${{ steps.vars.outputs.version }}
         body: |
           Realtek RTL8125 2.5G Ethernet DKMS driver package
+          
+          ## 🔧 功能特性
+          - ✅ DKMS 动态内核模块支持
+          - ✅ 自动禁用原生 r8169 驱动（防止冲突）
+          - ✅ 多核编译优化 (-j$(nproc))
+          - ✅ 自动更新 initramfs
+          - ✅ 兼容 PVE 8.x / 9.x (Kernel 6.2 - 6.12)
+          - ✅ 最小依赖，不强制安装不需要的内核头文件
+          
+          ## 📦 安装说明
+          ```
+          sudo dpkg -i realtek-r8125-dkms_${{ steps.vars.outputs.version }}-1_amd64.deb
+          ```
+          
+          ## ⚠️ 重要提示
+          1. **PVE 用户请注意**：如果在安装过程中提示缺少内核头文件，请先执行：
+          ```
+          apt update && apt install pve-headers
+          ```
+          2. 安装后需要重启系统才能完全生效
+          
+          ## 🔍 验证命令
+          ```
+          # 检查DKMS状态
+          dkms status
+          
+          # 检查模块信息
+          modinfo r8125
+          
+          # 检查模块是否已加载
+          lsmod | grep r8125
+          
+          # 确认原生驱动已禁用
+          lsmod | grep r8169
+          ```
+          
+          ## 📝 版本信息
+          - 驱动版本: ${{ steps.vars.outputs.version }}
+          - 发布日期: $(date -u +"%Y-%m-%d")
+          - 适用于: Realtek RTL8125 2.5G 网卡
+          
+          ## 🔗 相关链接
+          - [Realtek 官方驱动](https://www.realtek.com/en/component/zoo/category/network-interface-controllers-10-100-1000m-gigabit-ethernet-pci-express-software)
         draft: false
         prerelease: false
