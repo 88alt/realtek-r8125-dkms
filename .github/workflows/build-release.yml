@@ -108,12 +108,12 @@ jobs:
         mkdir -p "$PKGDIR/DEBIAN"
         
         # 创建control文件（优化：移除头文件依赖）
-        cat > "$PKGDIR/DEBIAN/control" <<EOF
-Package: $DEB_NAME
+        cat > "$PKGDIR/DEBIAN/control" << 'CONTROL_EOF'
+Package: realtek-r8125-dkms
 Version: $FULL_VERSION
 Section: kernel
 Priority: optional
-Architecture: $ARCH
+Architecture: amd64
 Maintainer: GitHub Actions <actions@github.com>
 Depends: dkms, build-essential
 Provides: r8125-dkms
@@ -123,22 +123,29 @@ Description: Realtek RTL8125 2.5G Ethernet DKMS driver
  Supports kernel up to 6.12.
  Compatible with Proxmox VE 8.x / 9.x.
  Built from Realtek official driver v$VERSION.
- Source: ${{ env.MANUAL_BACKUP_URL }}
-EOF
+ Source: https://github.com/timeflysoon/temp/releases/download/r8125/r8125-9.016.01.tar.bz2
+CONTROL_EOF
+        
+        # 替换变量
+        sed -i "s/\$FULL_VERSION/$FULL_VERSION/g" "$PKGDIR/DEBIAN/control"
+        sed -i "s/\$VERSION/$VERSION/g" "$PKGDIR/DEBIAN/control"
         
         # 创建DKMS目录
         mkdir -p "$PKGDIR/usr/src/r8125-$VERSION"
         
         # 创建dkms.conf（优化：多核编译）
-        cat > "$PKGDIR/usr/src/r8125-$VERSION/dkms.conf" <<EOF
+        cat > "$PKGDIR/usr/src/r8125-$VERSION/dkms.conf" << 'DKMS_EOF'
 PACKAGE_NAME="r8125"
 PACKAGE_VERSION="$VERSION"
 BUILT_MODULE_NAME[0]="r8125"
 DEST_MODULE_LOCATION[0]="/updates/dkms"
 AUTOINSTALL="yes"
-MAKE[0]="make -C src KVER=\${kernelver} -j\$(nproc)"
+MAKE[0]="make -C src KVER=${kernelver} -j$(nproc)"
 CLEAN="make -C src clean"
-EOF
+DKMS_EOF
+        
+        # 替换变量
+        sed -i "s/\$VERSION/$VERSION/g" "$PKGDIR/usr/src/r8125-$VERSION/dkms.conf"
         
         # 复制驱动源码到正确的目录结构
         echo "复制驱动源码从: $DRIVER_SRC"
@@ -172,15 +179,15 @@ EOF
         # 黑名单配置（防止 r8169 冲突）
         # ============================================
         mkdir -p "$PKGDIR/etc/modprobe.d"
-        cat > "$PKGDIR/etc/modprobe.d/r8125-blacklist.conf" <<EOF
+        cat > "$PKGDIR/etc/modprobe.d/r8125-blacklist.conf" << 'BLACKLIST_EOF'
 # 禁用原生 r8169 驱动，使用 r8125 驱动
 blacklist r8169
-EOF
+BLACKLIST_EOF
         
         # ============================================
         # postinst脚本（增加initramfs更新）
         # ============================================
-        cat > "$PKGDIR/DEBIAN/postinst" <<'EOF'
+        cat > "$PKGDIR/DEBIAN/postinst" << 'POSTINST_EOF'
 #!/bin/sh
 set -e
 
@@ -229,12 +236,15 @@ case "$1" in
 esac
 
 exit 0
-EOF
+POSTINST_EOF
+        
+        # 替换变量
+        sed -i "s/\$VERSION/$VERSION/g" "$PKGDIR/DEBIAN/postinst"
         
         # ============================================
         # prerm脚本
         # ============================================
-        cat > "$PKGDIR/DEBIAN/prerm" <<'EOF'
+        cat > "$PKGDIR/DEBIAN/prerm" << 'PRERM_EOF'
 #!/bin/sh
 set -e
 
@@ -254,7 +264,10 @@ case "$1" in
 esac
 
 exit 0
-EOF
+PRERM_EOF
+        
+        # 替换变量
+        sed -i "s/\$VERSION/$VERSION/g" "$PKGDIR/DEBIAN/prerm"
         
         # ============================================
         # 设置权限（显式设置，避免权限问题）
