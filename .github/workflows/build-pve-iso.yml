@@ -275,14 +275,19 @@ jobs:
           mkdir -p work/iso/pool/extras
           cp "$DRIVER_FILE" work/iso/pool/extras/
 
-          echo ">>> 3. 配置 Preseed"
+          echo ">>> 3. 配置 Preseed（兼容新旧安装器）"
           PRESEED="work/iso/preseed.cfg"
-          touch "$PRESEED"
-          # 动态判断逻辑：检查 PCI 设备中是否存在 Realtek 8125 (ID: 10ec:8125)
-          # 如果存在，则安装驱动并拉黑 r8169；否则不做任何操作。
-          if ! grep -q "r8125" "$PRESEED"; then
-            echo 'd-i preseed/late_command string in-target sh -c "if lspci -n | grep -q \"10ec:8125\"; then echo \"Detected RTL8125, installing driver...\"; dpkg -i /cdrom/pool/extras/*.deb; echo \"blacklist r8169\" >> /etc/modprobe.d/blacklist-pve.conf; depmod -a; modprobe r8125; else echo \"RTL8125 not detected, skipping.\"; fi"' >> "$PRESEED"
-          fi
+          cat > "$PRESEED" << 'EOF'
+          # 兼容 d-i (旧版) 和 pve-installer (新版)
+          d-i preseed/late_command string \
+            in-target sh -c "if lspci -n | grep -q '10ec:8125'; then \
+              echo 'Detected RTL8125, installing driver...'; \
+              dpkg -i /cdrom/pool/extras/*.deb; \
+              echo 'blacklist r8169' >> /etc/modprobe.d/blacklist-pve.conf; \
+              depmod -a; \
+              modprobe r8125; \
+            else echo 'RTL8125 not detected, skipping.'; fi"
+          EOF
 
           echo ">>> 4. 智能判断引导模式 (关键修复)"
           
