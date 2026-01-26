@@ -120,47 +120,47 @@ jobs:
       - name: Check if rebuild is needed
         id: check-rebuild
         run: |
-              SKIP=false
+          SKIP=false
 
-              if [ "${{ inputs.force_rebuild }}" = "true" ]; then
-                echo ">>> 强制重新构建模式"
-                echo "检查并删除已存在的 Release..."
+          if [ "${{ inputs.force_rebuild }}" = "true" ]; then
+            echo ">>> 强制重新构建模式"
+            echo "检查并删除已存在的 Release..."
 
-                RELEASE_INFO=$(curl -s \
-                  -H "Authorization: token ${{ github.token }}" \
-                  -H "Accept: application/vnd.github.v3+json" \
-                  "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${{ env.PVE_VERSION }}-r8125")
+            RELEASE_INFO=$(curl -s \
+              -H "Authorization: token ${{ github.token }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${{ env.PVE_VERSION }}-r8125")
 
-                if echo "$RELEASE_INFO" | jq -e '.id' >/dev/null 2>&1; then
-                  RELEASE_ID=$(echo "$RELEASE_INFO" | jq -r '.id')
-                  echo "删除 Release ID: $RELEASE_ID"
-                  curl -s -X DELETE \
-                    -H "Authorization: token ${{ github.token }}" \
-                    -H "Accept: application/vnd.github.v3+json" \
-                    "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/$RELEASE_ID"
-                  echo "✅ 已删除现有的 Release"
-                else
-                  echo "✅ 没有现有的 Release 需要删除"
-                fi
+            if echo "$RELEASE_INFO" | jq -e '.id' >/dev/null 2>&1; then
+              RELEASE_ID=$(echo "$RELEASE_INFO" | jq -r '.id')
+              echo "删除 Release ID: $RELEASE_ID"
+              curl -s -X DELETE \
+                -H "Authorization: token ${{ github.token }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/$RELEASE_ID"
+              echo "✅ 已删除现有的 Release"
+            else
+              echo "✅ 没有现有的 Release 需要删除"
+            fi
 
-                SKIP=false
-              else
-                echo ">>> 检查现有 Release"
+            SKIP=false
+          else
+            echo ">>> 检查现有 Release"
 
-                RELEASE_INFO=$(curl -s \
-                  -H "Authorization: token ${{ github.token }}" \
-                  -H "Accept: application/vnd.github.v3+json" \
-                  "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${{ env.PVE_VERSION }}-r8125")
+            RELEASE_INFO=$(curl -s \
+              -H "Authorization: token ${{ github.token }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${{ env.PVE_VERSION }}-r8125")
 
-                if echo "$RELEASE_INFO" | jq -e '.id' >/dev/null 2>&1; then
-                  echo "✅ 已存在版本 ${{ env.PVE_VERSION }}-r8125 的 Release，跳过构建"
-                  SKIP=true
-                else
-                  echo ">>> 未找到现有 Release，继续构建"
-                fi
-              fi
+            if echo "$RELEASE_INFO" | jq -e '.id' >/dev/null 2>&1; then
+              echo "✅ 已存在版本 ${{ env.PVE_VERSION }}-r8125 的 Release，跳过构建"
+              SKIP=true
+            else
+              echo ">>> 未找到现有 Release，继续构建"
+            fi
+          fi
 
-              echo "skip_build=$SKIP" >> $GITHUB_OUTPUT
+          echo "skip_build=$SKIP" >> $GITHUB_OUTPUT
       - name: Download RTL8125 Driver from Private Repo
         if: ${{ steps.check-rebuild.outputs.skip_build != 'true' }}
         env:
@@ -223,7 +223,7 @@ jobs:
             grep -v "r8125" "$PRESEED" > "${PRESEED}.tmp" || true
             mv "${PRESEED}.tmp" "$PRESEED"
           fi
-          cat >> "$PRESEED" << 'EOF'
+          cat >> "$PRESEED" << EOF
 d-i preseed/late_command string in-target sh -c '
   if lspci -n | grep -q "10ec:8125"; then
     dpkg -i /cdrom/pool/extras/*.deb > /dev/null 2>&1
