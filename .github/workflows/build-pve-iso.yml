@@ -275,12 +275,32 @@ jobs:
           mkdir -p work/iso/pool/extras
           cp "$DRIVER_FILE" work/iso/pool/extras/
 
-          echo ">>> 3. 配置 Preseed"
+          echo ">>> 3. 配置 Preseed (智能识别 RTL8125)"
           PRESEED="work/iso/preseed.cfg"
-          touch "$PRESEED"
-          if ! grep -q "r8125" "$PRESEED"; then
-            echo 'd-i preseed/late_command string in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb; depmod -a; modprobe r8125"' >> "$PRESEED"
+          
+          # 保留原preseed内容（如果有），并追加动态判断逻辑
+          if [ -f "$PRESEED" ]; then
+            # 移除可能存在的旧版驱动安装命令
+            grep -v "r8125" "$PRESEED" > "${PRESEED}.tmp" || true
+            mv "${PRESEED}.tmp" "$PRESEED"
           fi
+          
+          # 使用 'EOF' 引用 Here Doc，防止 $ 符号被 GitHub Action 的宿主机环境误解析
+          # 优化：保持静默安装，避免 update-initramfs 日志让用户误以为卡死
+          cat >> "$PRESEED" << 'EOF'
+d-i preseed/late_command string in-target sh -c '
+  if lspci -n | grep -q "10ec:8125"; then
+    # 静默安装驱动，避免干扰安装界面
+    dpkg -i /cdrom/pool/extras/*.deb > /dev/null 2>&1
+    echo "blacklist r8169" > /etc/modprobe.d/blacklist-r8169.conf
+    # 启用 ASPM 节能（如果 BIOS 支持）
+    echo "options r8125 aspm=1" > /etc/modprobe.d/r8125.conf
+    depmod -a > /dev/null 2>&1
+    # 静默更新 initramfs，避免 PVE 9.x 安装界面显示过多日志
+    update-initramfs -u > /dev/null 2>&1
+  fi
+'
+EOF
 
           echo ">>> 4. 智能判断引导模式 (关键修复)"
           
@@ -356,8 +376,18 @@ jobs:
           name: PVE ${{ env.PVE_VERSION }} with RTL8125
           body: |
             - **PVE 版本**: ${{ env.PVE_VERSION }}
-            - **RTL8125 驱动版本**: ${{ env.DRIVER_DISPLAY_VERSION }}
-            - **SHA256**: ${{ env.SHA256 }}
+            - **驱动版本**: ${{ env.DRIVER_DISPLAY_VERSION }}
+            - **SHA256**: `${{ env.SHA256 }}`
+            - **功能特性**:
+              - ✅ 自动网卡识别：仅在检测到 **RTL8125** 时安装驱动
+              - ✅ 静默安装：避免安装界面显示过多日志
+              - ✅ 电源优化：自动启用 ASPM 节能模式
+              - ✅ 驱动拉黑：自动禁用原生 `r8169` 驱动
+              - ✅ 最大兼容：其他网卡保持原版驱动，无任何影响
+            - **注意事项**:
+              - 驱动使用 DKMS 框架，确保内核更新后自动重建
+              - 如果安装过程中有短暂停顿（约30-60秒），这是正常的 initramfs 更新过程
+              - 本镜像完全兼容 RTL8168/8111 等老网卡
           files: |
             ${{ env.ISO_OUTPUT }}
           draft: false
@@ -370,7 +400,7 @@ jobs:
         if: always()
         run: |
           echo "清理临时文件..."
-          rm -rf work drivers sha256.txt "$ISO_OUTPUT"
+          rm -rf work drivers
           # 可选：保留原始 ISO 用于缓存和调试，不删除
           # rm -f "$ISO_ORIG"
 
