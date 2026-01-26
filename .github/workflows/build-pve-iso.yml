@@ -385,8 +385,8 @@ EOF
         if: ${{ steps.check-rebuild.outputs.skip_build != 'true' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: pve-${{ env.PVE_VERSION }}-r8125
-          name: PVE ${{ env.PVE_VERSION }} with RTL8125
+          tag_name: "pve-${{ env.PVE_VERSION }}-r8125"
+          name: "PVE ${{ env.PVE_VERSION }} with RTL8125"
           body: |
             - **PVE 版本**: ${{ env.PVE_VERSION }}
             - **RTL8125 驱动版本**: ${{ env.DRIVER_DISPLAY_VERSION }}
