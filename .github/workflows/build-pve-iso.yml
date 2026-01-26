@@ -167,7 +167,7 @@ jobs:
             RELEASE_INFO=$(curl -s \
               -H "Authorization: token ${{ github.token }}" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${PVE_VERSION}")
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${PVE_VERSION}-r8125")
            
             if [ "$(echo "$RELEASE_INFO" | jq -r '.message // "exists"')" != "Not Found" ]; then
               RELEASE_ID=$(echo "$RELEASE_INFO" | jq -r '.id')
@@ -187,7 +187,7 @@ jobs:
             RELEASE_INFO=$(curl -s \
               -H "Authorization: token ${{ github.token }}" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${PVE_VERSION}")
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${PVE_VERSION}-r8125")
            
             if [ "$(echo "$RELEASE_INFO" | jq -r '.message // "exists"')" != "Not Found" ]; then
               echo "✅ 已存在版本 ${PVE_VERSION}-r8125 的 Release，跳过构建"
