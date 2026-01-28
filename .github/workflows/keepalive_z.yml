@@ -1,0 +1,57 @@
+name: Z-Account Cloud KeepAlive
+
+on:
+  schedule:
+    # 方案：每 4 小时唤醒一次 (UTC 0, 4, 8, 12, 16, 20 点)
+    # 结合下面的随机休眠，可以覆盖全天 0-24 小时的任意时间段
+    - cron: '0 */4 * * *'
+  workflow_dispatch: # 允许手动点按钮测试
+
+jobs:
+  cloud-run:
+    runs-on: ubuntu-latest
+    # 设置超时防止卡死
+    timeout-minutes: 120 
+
+    steps:
+      - name: ☁️ Checkout Code
+        uses: actions/checkout@v3
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: 📦 Install Libraries
+        run: pip install requests
+
+      - name: 🎲 Random Delay & Probability
+        shell: bash
+        run: |
+          # 策略：即使 Cron 定时触发，也不一定非要跑，或者不用立刻跑
+          
+          # 1. 掷骰子：30% 的概率直接跳过本次运行 (模拟用户没上线)
+          # 如果是手动触发 (workflow_dispatch)，则必须跑
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            CHANCE=$((RANDOM % 10))
+            if [ $CHANCE -lt 3 ]; then
+              echo ">>> [Skip] 今天的这个时间段用户决定不上线 (30%概率)。"
+              exit 0
+            fi
+          fi
+
+          # 2. 随机等待：0 到 3600 秒 (1小时)
+          # 这样 API 调用时间点就不再是整点，而是比如 04:12, 08:45 等
+          WAIT_SEC=$((RANDOM % 3600))
+          echo ">>> [Wait] 模拟人类行为，等待 ${WAIT_SEC} 秒后开始操作..."
+          sleep $WAIT_SEC
+
+      - name: 🚀 Run Cloud Script
+        env:
+          # 映射 Secrets (确保名字和你仓库设置的一样)
+          Z_CLIENT_ID: ${{ secrets.Z_CLIENT_ID }}
+          Z_CLIENT_SECRET: ${{ secrets.Z_CLIENT_SECRET }}
+          Z_REFRESH_TOKEN: ${{ secrets.Z_REFRESH_TOKEN }}
+          # 租户ID选填，脚本里没用到
+          Z_TENANT_ID: ${{ secrets.Z_TENANT_ID }}
+        run: python main.py
