@@ -9,8 +9,16 @@ from datetime import datetime
 CLIENT_ID = os.environ.get('Z_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('Z_CLIENT_SECRET')
 REFRESH_TOKEN = os.environ.get('Z_REFRESH_TOKEN')
+TENANT_ID = os.environ.get('Z_TENANT_ID') # <--- 新增：必须读取租户ID
 
-TOKEN_URL = 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
+# 检查租户ID是否存在，如果不存在则报错
+if not TENANT_ID:
+    print("!! [配置错误] 缺少 Z_TENANT_ID。因为你的应用是单租户模式，必须提供 Tenant ID。")
+    print("请检查 GitHub Secrets 和 workflow 里的环境变量映射。")
+    exit(1)
+
+# --- 关键修改：把 /common 改为 /{TENANT_ID} ---
+TOKEN_URL = f'https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token'
 GRAPH_URL = 'https://graph.microsoft.com/v1.0'
 DATA_FOLDER = "/Data"
 
@@ -21,9 +29,6 @@ def get_access_token():
     # 检查 Secrets 是否读取成功
     if not CLIENT_ID or not CLIENT_SECRET or not REFRESH_TOKEN:
         print("!! [致命错误] GitHub Secrets 读取失败！")
-        print(f"   Z_CLIENT_ID: {'有值' if CLIENT_ID else '空'}")
-        print(f"   Z_CLIENT_SECRET: {'有值' if CLIENT_SECRET else '空'}")
-        print(f"   Z_REFRESH_TOKEN: {'有值' if REFRESH_TOKEN else '空'}")
         exit(1)
 
     data = {
@@ -41,17 +46,8 @@ def get_access_token():
     if r.status_code != 200:
         print("\n" + "="*40)
         print(f"!! [致命错误] 状态码: {r.status_code}")
-        print(f"!! [微软原话]: {r.text}")  # <--- 这一行是解题的关键
+        print(f"!! [微软原话]: {r.text}") 
         print("="*40 + "\n")
-        
-        if "invalid_client" in r.text:
-            print(">> [诊断]: Client Secret 填错了！你可能填成了 Secret ID。")
-            print(">> 请去 Azure 重新生成一个，务必复制那个【只显示一次的 Value】。")
-        elif "invalid_grant" in r.text:
-            print(">> [诊断]: Refresh Token 无效。可能是复制不全，或账号密码改过。")
-        elif "unauthorized_client" in r.text:
-            print(">> [诊断]: Client ID 错，或者 rclone 获取 token 时没有勾选 offline_access。")
-            
         exit(1)
         
     return r.json()['access_token']
