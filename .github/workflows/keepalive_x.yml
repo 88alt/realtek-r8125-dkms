@@ -1,0 +1,46 @@
+name: X-Account Auto KeepAlive
+
+on:
+  schedule:
+    # 账号 X 的时间表：每天 2点, 8点, 14点, 20点 (错峰出行)
+    - cron: '30 2,8,14,20 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  run-x-account:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Requests
+        run: pip install requests
+
+      - name: Random Delay
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo ">>> Manual Trigger: Skipping delay."
+            exit 0
+          else
+            # 随机休眠 0-45 分钟
+            WAIT_SEC=$((RANDOM % 2700))
+            echo "Sleeping for ${WAIT_SEC} seconds"
+            sleep $WAIT_SEC
+          fi
+
+      - name: Run Script for Account X
+        env:
+          # 【关键】这里做映射：把 OD_ 账号的密码传给通用脚本
+          CLIENT_ID: ${{ secrets.OD_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.OD_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.OD_REFRESH_TOKEN }}
+          TENANT_ID: ${{ secrets.OD_TENANT_ID }}
+        run: python main.py
