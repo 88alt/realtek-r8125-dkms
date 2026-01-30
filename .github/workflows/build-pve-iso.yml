@@ -1,4 +1,5 @@
 name: Build and Release PVE ISO with RTL8125
+
 on:
   workflow_dispatch:
     inputs:
@@ -18,27 +19,33 @@ on:
         description: 'RTL8125 Driver URL'
         required: true
         default: 'https://github.com/timeflysoon/realtek-r8125-dkms/releases/download/v9.016.01/realtek-r8125-dkms_9.016.01-1_amd64.deb'
+
 permissions:
   contents: write
+
 # ============================【只需要修改这里】============================
 # 注意：无需编辑此 YAML 文件。
 # 要修改配置，请在触发 workflow 时通过 inputs 输入自定义 URL 值。
 # 默认值已设置，如果不修改将使用默认。
 # =======================================================================
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60  # 防止长时间挂起
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      
       - name: Install dependencies
         run: |
           sudo apt-get update
           # 添加 isolinux 包以获取 isohdpfx.bin（为旧版 PVE 准备）
           sudo apt-get install -y xorriso curl file jq isolinux
+      
       # =========================
       # 解析 ISO URL 以获取文件名（用于缓存和下载）
       # =========================
@@ -46,6 +53,7 @@ jobs:
         run: |
           ISO_ORIG=$(basename "${{ inputs.proxmox_iso_url }}")
           echo "ISO_ORIG=$ISO_ORIG" >> $GITHUB_ENV
+      
       # =========================
       # 缓存 Proxmox ISO
       # =========================
@@ -57,6 +65,7 @@ jobs:
           key: pve-iso-${{ env.ISO_ORIG }}-${{ github.run_id }}
           restore-keys: |
             pve-iso-${{ env.ISO_ORIG }}
+      
       # =========================
       # 下载 Proxmox ISO（如果未缓存）
       # =========================
@@ -67,6 +76,7 @@ jobs:
           echo ">>> ISO 文件信息："
           ls -lh "$ISO_ORIG"
           file "$ISO_ORIG"
+      
       # =========================
       # 验证 ISO 完整性
       # =========================
@@ -86,6 +96,7 @@ jobs:
             exit 1
           fi
           echo "✅ ISO 验证通过"
+      
       # =========================
       # 解析配置（自动生成所有变量）
       # =========================
@@ -153,6 +164,7 @@ jobs:
             echo "URL 格式应为: https://github.com/owner/repo/releases/download/tag/filename"
             exit 1
           fi
+      
       # =========================
       # 检查是否需要重建（修正：强制重建时删除已存在的 Release）
       # =========================
@@ -198,6 +210,7 @@ jobs:
             fi
           fi
           echo "skip_build=$SKIP" >> $GITHUB_OUTPUT
+      
       # =========================
       # 下载私有仓库 RTL8125 DKMS
       # =========================
@@ -259,6 +272,7 @@ jobs:
             echo "❌ 驱动文件过小，可能下载失败"
             exit 1
           fi
+      
       # =========================
       # 构建 ISO (智能适配 PVE 8.2+ 纯GRUB架构)
       # =========================
@@ -282,109 +296,111 @@ jobs:
 
           echo ">>> 3. 【核心修改】配置 Preseed (通用全盘搜索与安装)"
           PRESEED_FILE="work/iso/preseed.cfg"
-          cat > "$PRESEED_FILE" << 'EOF'
-# PVE 自动安装配置 - 通用驱动集成版
-d-i partman/early_command string debconf-set partman-auto/disk "$(list-devices disk | head -1)"
-
-d-i preseed/late_command string \
-    # 第一阶段：在全系统范围内暴力搜索驱动包
-    mkdir -p /mnt/search_source; \
-    DRIVER_SOURCE_PATH=""; \
-    echo "===== 开始搜索 RTL8125 驱动包 =====" > /dev/console; \
-    \
-    # 1. 首先尝试标准 ISO 挂载点（非Ventoy环境）
-    for MOUNT_POINT in /cdrom /media/cdrom /mnt/cdrom /dev/sr0; do \
-        if mount $MOUNT_POINT /mnt/search_source 2>/dev/null; then \
-            echo "正在搜索标准挂载点: $MOUNT_POINT" > /dev/console; \
-            DEB_FILE=$(find /mnt/search_source -type f -name "realtek-r8125-dkms*.deb" 2>/dev/null | head -1); \
-            if [ -n "$DEB_FILE" ]; then \
-                DRIVER_SOURCE_PATH="$DEB_FILE"; \
-                echo "✅ 在标准挂载点找到驱动包: $DRIVER_SOURCE_PATH" > /dev/console; \
-                umount /mnt/search_source; \
-                break; \
-            fi; \
-            umount /mnt/search_source; \
-        fi; \
-    done; \
-    \
-    # 2. 如果标准点没找到，开始扫描所有磁盘分区（针对Ventoy等环境）
-    if [ -z "$DRIVER_SOURCE_PATH" ]; then \
-        echo "标准挂载点未找到，开始扫描磁盘分区..." > /dev/console; \
-        # 使用更宽泛的匹配模式，覆盖 sd[a-z]1 到 sd[a-z]9, sd[a-z]10+， nvme0n1p1 到 nvmeXnYpZ 等
-        for DISK_PARTITION in /dev/sd[a-z][1-9]* /dev/nvme[0-9]n[0-9]p[1-9]* /dev/mmcblk[0-9]p[1-9]*; do \
-            if [ -e "$DISK_PARTITION" ]; then \
-                if mount "$DISK_PARTITION" /mnt/search_source 2>/dev/null; then \
-                    echo "正在扫描分区: $DISK_PARTITION" > /dev/console; \
-                    DEB_FILE=$(find /mnt/search_source -type f -name "realtek-r8125-dkms*.deb" 2>/dev/null | head -1); \
-                    if [ -n "$DEB_FILE" ]; then \
-                        DRIVER_SOURCE_PATH="$DEB_FILE"; \
-                        echo "✅ 在分区 $DISK_PARTITION 上找到驱动包: $DRIVER_SOURCE_PATH" > /dev/console; \
-                        umount /mnt/search_source; \
-                        break; \
-                    fi; \
-                    umount /mnt/search_source; \
-                fi; \
-            fi; \
-        done; \
-    fi; \
-    \
-    # 3. 将找到的驱动包复制到新系统的 /tmp 目录
-    if [ -n "$DRIVER_SOURCE_PATH" ]; then \
-        cp "$DRIVER_SOURCE_PATH" /target/tmp/r8125.driver.deb; \
-        echo "驱动包已复制到新系统: /tmp/r8125.driver.deb" > /dev/console; \
-    else \
-        echo "⚠️  警告：在所有位置均未找到驱动包。请手动安装。" > /dev/console; \
-    fi; \
-    \
-    # 第二阶段：进入新安装的系统进行配置和安装
-    in-target sh -c '\'' \
-        echo "===== 开始驱动安装与系统配置 =====" > /dev/console; \
-        INSTALL_LOG="/root/r8125_post_install.log"; \
-        echo "驱动安装日志: $INSTALL_LOG" > /dev/console; \
-        \
-        # A. 【绝对优先】创建黑名单配置，完全阻止 r8169
-        echo "1. 创建黑名单配置..." > /dev/console; \
-        echo "blacklist r8169" > /etc/modprobe.d/r8125-blacklist.conf; \
-        echo "install r8169 /bin/true" >> /etc/modprobe.d/r8125-blacklist.conf; \
-        echo "✅ 原生 r8169 驱动已被加入黑名单。" > /dev/console; \
-        \
-        # B. 将 r8125 加入启动模块列表
-        echo "2. 配置启动加载模块..." > /dev/console; \
-        echo "r8125" >> /etc/modules; \
-        echo "✅ r8125 模块已加入 /etc/modules。" > /dev/console; \
-        \
-        # C. 如果找到了驱动包，尝试安装
-        if [ -f /tmp/r8125.driver.deb ]; then \
-            echo "3. 开始安装驱动包..." > /dev/console; \
-            # 强制安装，允许缺少依赖（如dkms），这是离线安装的关键
-            dpkg --force-depends -i /tmp/r8125.driver.deb 2>&1 | tee $INSTALL_LOG; \
-            echo "驱动包安装完成，日志已保存。" > /dev/console; \
-            \
-            # D. 检查并尝试编译驱动（如果环境允许）
-            if command -v dkms >/dev/null 2>&1 && [ -d "/lib/modules/$(uname -r)/build" ]; then \
-                echo "4. 检测到编译环境，尝试构建驱动模块..." > /dev/console; \
-                dkms install r8125 2>&1 | tee -a $INSTALL_LOG; \
-            else \
-                echo "4. 注意：当前缺少编译环境（dkms或内核头文件）。" > /dev/console; \
-                echo "   驱动将在安装 pve-headers 后自动构建。" | tee -a $INSTALL_LOG; \
-                echo "   可联网后执行: apt update && apt install pve-headers dkms" | tee -a $INSTALL_LOG; \
-            fi; \
-        else \
-            echo "3. 跳过驱动包安装（未找到文件）。" > /dev/console; \
-            echo "未找到驱动包文件，请手动安装。" > $INSTALL_LOG; \
-        fi; \
-        \
-        # E. 【关键步骤】无论如何都更新 initramfs，使黑名单和模块列表生效
-        echo "5. 更新系统启动镜像 (initramfs)..." > /dev/console; \
-        update-initramfs -u -k all 2>&1 | tee -a $INSTALL_LOG; \
-        echo "✅ initramfs 更新完成，黑名单将在下次启动时生效。" > /dev/console; \
-        \
-        echo "===== 安装后配置完成 =====" > /dev/console; \
-        echo "请查看 $INSTALL_LOG 获取详细信息。" > /dev/console; \
-        echo "提示：若首次启动后网卡灯不亮（因缺少头文件），请在联网后安装 pve-headers 并重启。" > /dev/console; \
-    '\''; \
-    echo "late_command 执行结束。" > /dev/console
-EOF
+          
+          # 写入 early_command (修复了原来的YAML语法问题)
+          echo 'd-i partman/early_command string debconf-set partman-auto/disk "$(list-devices disk | head -1)"' > "$PRESEED_FILE"
+          echo '' >> "$PRESEED_FILE"
+          
+          # 开始写入 late_command
+          echo 'd-i preseed/late_command string \' >> "$PRESEED_FILE"
+          echo '    # 第一阶段：在全系统范围内暴力搜索驱动包' >> "$PRESEED_FILE"
+          echo '    mkdir -p /mnt/search_source; \' >> "$PRESEED_FILE"
+          echo '    DRIVER_SOURCE_PATH=""; \' >> "$PRESEED_FILE"
+          echo '    echo "===== 开始搜索 RTL8125 驱动包 =====" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '    \' >> "$PRESEED_FILE"
+          echo '    # 1. 首先尝试标准 ISO 挂载点（非Ventoy环境）' >> "$PRESEED_FILE"
+          echo '    for MOUNT_POINT in /cdrom /media/cdrom /mnt/cdrom /dev/sr0; do \' >> "$PRESEED_FILE"
+          echo '        if mount $MOUNT_POINT /mnt/search_source 2>/dev/null; then \' >> "$PRESEED_FILE"
+          echo '            echo "正在搜索标准挂载点: $MOUNT_POINT" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '            DEB_FILE=$(find /mnt/search_source -type f -name "realtek-r8125-dkms*.deb" 2>/dev/null | head -1); \' >> "$PRESEED_FILE"
+          echo '            if [ -n "$DEB_FILE" ]; then \' >> "$PRESEED_FILE"
+          echo '                DRIVER_SOURCE_PATH="$DEB_FILE"; \' >> "$PRESEED_FILE"
+          echo '                echo "✅ 在标准挂载点找到驱动包: $DRIVER_SOURCE_PATH" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '                umount /mnt/search_source; \' >> "$PRESEED_FILE"
+          echo '                break; \' >> "$PRESEED_FILE"
+          echo '            fi; \' >> "$PRESEED_FILE"
+          echo '            umount /mnt/search_source; \' >> "$PRESEED_FILE"
+          echo '        fi; \' >> "$PRESEED_FILE"
+          echo '    done; \' >> "$PRESEED_FILE"
+          echo '    \' >> "$PRESEED_FILE"
+          echo '    # 2. 如果标准点没找到，开始扫描所有磁盘分区（针对Ventoy等环境）' >> "$PRESEED_FILE"
+          echo '    if [ -z "$DRIVER_SOURCE_PATH" ]; then \' >> "$PRESEED_FILE"
+          echo '        echo "标准挂载点未找到，开始扫描磁盘分区..." > /dev/console; \' >> "$PRESEED_FILE"
+          echo '        # 使用更宽泛的匹配模式，覆盖 sd[a-z]1 到 sd[a-z]9, sd[a-z]10+， nvme0n1p1 到 nvmeXnYpZ 等' >> "$PRESEED_FILE"
+          echo '        for DISK_PARTITION in /dev/sd[a-z][1-9]* /dev/nvme[0-9]n[0-9]p[1-9]* /dev/mmcblk[0-9]p[1-9]*; do \' >> "$PRESEED_FILE"
+          echo '            if [ -e "$DISK_PARTITION" ]; then \' >> "$PRESEED_FILE"
+          echo '                if mount "$DISK_PARTITION" /mnt/search_source 2>/dev/null; then \' >> "$PRESEED_FILE"
+          echo '                    echo "正在扫描分区: $DISK_PARTITION" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '                    DEB_FILE=$(find /mnt/search_source -type f -name "realtek-r8125-dkms*.deb" 2>/dev/null | head -1); \' >> "$PRESEED_FILE"
+          echo '                    if [ -n "$DEB_FILE" ]; then \' >> "$PRESEED_FILE"
+          echo '                        DRIVER_SOURCE_PATH="$DEB_FILE"; \' >> "$PRESEED_FILE"
+          echo '                        echo "✅ 在分区 $DISK_PARTITION 上找到驱动包: $DRIVER_SOURCE_PATH" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '                        umount /mnt/search_source; \' >> "$PRESEED_FILE"
+          echo '                        break; \' >> "$PRESEED_FILE"
+          echo '                    fi; \' >> "$PRESEED_FILE"
+          echo '                    umount /mnt/search_source; \' >> "$PRESEED_FILE"
+          echo '                fi; \' >> "$PRESEED_FILE"
+          echo '            fi; \' >> "$PRESEED_FILE"
+          echo '        done; \' >> "$PRESEED_FILE"
+          echo '    fi; \' >> "$PRESEED_FILE"
+          echo '    \' >> "$PRESEED_FILE"
+          echo '    # 3. 将找到的驱动包复制到新系统的 /tmp 目录' >> "$PRESEED_FILE"
+          echo '    if [ -n "$DRIVER_SOURCE_PATH" ]; then \' >> "$PRESEED_FILE"
+          echo '        cp "$DRIVER_SOURCE_PATH" /target/tmp/r8125.driver.deb; \' >> "$PRESEED_FILE"
+          echo '        echo "驱动包已复制到新系统: /tmp/r8125.driver.deb" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '    else \' >> "$PRESEED_FILE"
+          echo '        echo "⚠️  警告：在所有位置均未找到驱动包。请手动安装。" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '    fi; \' >> "$PRESEED_FILE"
+          echo '    \' >> "$PRESEED_FILE"
+          echo '    # 第二阶段：进入新安装的系统进行配置和安装' >> "$PRESEED_FILE"
+          echo '    in-target sh -c '\'' \' >> "$PRESEED_FILE"
+          echo '        echo "===== 开始驱动安装与系统配置 =====" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '        INSTALL_LOG="/root/r8125_post_install.log"; \' >> "$PRESEED_FILE"
+          echo '        echo "驱动安装日志: $INSTALL_LOG" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '        \' >> "$PRESEED_FILE"
+          echo '        # A. 【绝对优先】创建黑名单配置，完全阻止 r8169' >> "$PRESEED_FILE"
+          echo '        echo "1. 创建黑名单配置..." > /dev/console; \' >> "$PRESEED_FILE"
+          echo '        echo "blacklist r8169" > /etc/modprobe.d/r8125-blacklist.conf; \' >> "$PRESEED_FILE"
+          echo '        echo "install r8169 /bin/true" >> /etc/modprobe.d/r8125-blacklist.conf; \' >> "$PRESEED_FILE"
+          echo '        echo "✅ 原生 r8169 驱动已被加入黑名单。" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '        \' >> "$PRESEED_FILE"
+          echo '        # B. 将 r8125 加入启动模块列表' >> "$PRESEED_FILE"
+          echo '        echo "2. 配置启动加载模块..." > /dev/console; \' >> "$PRESEED_FILE"
+          echo '        echo "r8125" >> /etc/modules; \' >> "$PRESEED_FILE"
+          echo '        echo "✅ r8125 模块已加入 /etc/modules。" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '        \' >> "$PRESEED_FILE"
+          echo '        # C. 如果找到了驱动包，尝试安装' >> "$PRESEED_FILE"
+          echo '        if [ -f /tmp/r8125.driver.deb ]; then \' >> "$PRESEED_FILE"
+          echo '            echo "3. 开始安装驱动包..." > /dev/console; \' >> "$PRESEED_FILE"
+          echo '            # 强制安装，允许缺少依赖（如dkms），这是离线安装的关键' >> "$PRESEED_FILE"
+          echo '            dpkg --force-depends -i /tmp/r8125.driver.deb 2>&1 | tee $INSTALL_LOG; \' >> "$PRESEED_FILE"
+          echo '            echo "驱动包安装完成，日志已保存。" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '            \' >> "$PRESEED_FILE"
+          echo '            # D. 检查并尝试编译驱动（如果环境允许）' >> "$PRESEED_FILE"
+          echo '            if command -v dkms >/dev/null 2>&1 && [ -d "/lib/modules/$(uname -r)/build" ]; then \' >> "$PRESEED_FILE"
+          echo '                echo "4. 检测到编译环境，尝试构建驱动模块..." > /dev/console; \' >> "$PRESEED_FILE"
+          echo '                dkms install r8125 2>&1 | tee -a $INSTALL_LOG; \' >> "$PRESEED_FILE"
+          echo '            else \' >> "$PRESEED_FILE"
+          echo '                echo "4. 注意：当前缺少编译环境（dkms或内核头文件）。" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '                echo "   驱动将在安装 pve-headers 后自动构建。" | tee -a $INSTALL_LOG; \' >> "$PRESEED_FILE"
+          echo '                echo "   可联网后执行: apt update && apt install pve-headers dkms" | tee -a $INSTALL_LOG; \' >> "$PRESEED_FILE"
+          echo '            fi; \' >> "$PRESEED_FILE"
+          echo '        else \' >> "$PRESEED_FILE"
+          echo '            echo "3. 跳过驱动包安装（未找到文件）。" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '            echo "未找到驱动包文件，请手动安装。" > $INSTALL_LOG; \' >> "$PRESEED_FILE"
+          echo '        fi; \' >> "$PRESEED_FILE"
+          echo '        \' >> "$PRESEED_FILE"
+          echo '        # E. 【关键步骤】无论如何都更新 initramfs，使黑名单和模块列表生效' >> "$PRESEED_FILE"
+          echo '        echo "5. 更新系统启动镜像 (initramfs)..." > /dev/console; \' >> "$PRESEED_FILE"
+          echo '        update-initramfs -u -k all 2>&1 | tee -a $INSTALL_LOG; \' >> "$PRESEED_FILE"
+          echo '        echo "✅ initramfs 更新完成，黑名单将在下次启动时生效。" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '        \' >> "$PRESEED_FILE"
+          echo '        echo "===== 安装后配置完成 =====" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '        echo "请查看 $INSTALL_LOG 获取详细信息。" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '        echo "提示：若首次启动后网卡灯不亮（因缺少头文件），请在联网后安装 pve-headers 并重启。" > /dev/console; \' >> "$PRESEED_FILE"
+          echo '    '\''; \' >> "$PRESEED_FILE"
+          echo '    echo "late_command 执行结束。" > /dev/console' >> "$PRESEED_FILE"
+          
           echo "✅ Preseed 配置文件已生成（含通用驱动搜索逻辑）。"
 
           echo ">>> 4. 智能判断引导模式"
@@ -442,6 +458,7 @@ EOF
           ISO_SIZE_MB=$((ISO_SIZE/1024/1024))
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
           echo "ISO_SIZE_MB=$ISO_SIZE_MB" >> $GITHUB_ENV
+      
       # =========================
       # 发布 Release
       # =========================
@@ -491,6 +508,7 @@ EOF
           draft: false
           prerelease: false
           generate_release_notes: false
+      
       # =========================
       # 清理临时文件
       # =========================
