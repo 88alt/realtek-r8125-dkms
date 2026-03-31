@@ -1,41 +1,28 @@
-name: X-Account Auto KeepAlive
-
+name: X-Account KeepAlive
 on:
   schedule:
-    - cron: '30 2,8,14,20 * * *' # 每天4次
+    - cron: '30 2,8,14,20 * * *'
   workflow_dispatch: {}
-
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: x-group
   cancel-in-progress: true
-
 jobs:
-  run-x-account:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
           python-version: '3.9'
       - run: pip install requests
-
-      - name: Random Delay
-        shell: bash
+      - shell: bash
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            exit 0
-          fi
-          WAIT_SEC=$((RANDOM % 2700))
-          echo "Waiting $WAIT_SEC seconds..."
-          sleep $WAIT_SEC
-
-      - name: Run Script
-        env:
+          [ "${{ github.event_name }}" == "workflow_dispatch" ] && exit 0
+          sleep $((RANDOM % 2700))
+      - env:
           GITHUB_REPO_NAME: ${{ github.repository }}
-          CLIENT_ID: ${{ secrets.OD_CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.OD_CLIENT_SECRET }}
-          REFRESH_TOKEN: ${{ secrets.OD_REFRESH_TOKEN }}
-          TENANT_ID: ${{ secrets.OD_TENANT_ID }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+          TENANT_ID: ${{ secrets.TENANT_ID }}
         run: python main.py
