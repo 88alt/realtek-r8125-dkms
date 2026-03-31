@@ -1,42 +1,28 @@
-name: Z-Account Auto KeepAlive
-
+name: Z-Account KeepAlive
 on:
   schedule:
-    - cron: '0 */6 * * *' # 每6小时一次
+    - cron: '0 */6 * * *'
   workflow_dispatch: {}
-
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: z-group
   cancel-in-progress: true
-
 jobs:
-  run-z-account:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
           python-version: '3.9'
       - run: pip install requests
-
-      - name: Random Delay
-        shell: bash
+      - shell: bash
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            exit 0
-          fi
-          # Z账号设定1小时随机范围，错峰效果更好
-          WAIT_SEC=$((RANDOM % 3600))
-          echo "Waiting $WAIT_SEC seconds..."
-          sleep $WAIT_SEC
-
-      - name: Run Script
-        env:
+          [ "${{ github.event_name }}" == "workflow_dispatch" ] && exit 0
+          sleep $((RANDOM % 3600))
+      - env:
           GITHUB_REPO_NAME: ${{ github.repository }}
-          CLIENT_ID: ${{ secrets.Z_CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.Z_CLIENT_SECRET }}
-          REFRESH_TOKEN: ${{ secrets.Z_REFRESH_TOKEN }}
-          TENANT_ID: ${{ secrets.Z_TENANT_ID }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+          TENANT_ID: ${{ secrets.TENANT_ID }}
         run: python main.py
