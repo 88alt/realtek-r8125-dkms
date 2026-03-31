@@ -1,25 +1,39 @@
 name: X-Account KeepAlive
+
 on:
   schedule:
     - cron: '30 2,8,14,20 * * *'
   workflow_dispatch: {}
+
 concurrency:
-  group: x-group
+  group: x-account-group
   cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4 # 已升级版本
+      - uses: actions/setup-python@v5 # 已升级版本
         with:
           python-version: '3.9'
       - run: pip install requests
-      - shell: bash
+
+      - name: Random Delay
+        shell: bash
         run: |
-          [ "${{ github.event_name }}" == "workflow_dispatch" ] && exit 0
-          sleep $((RANDOM % 2700))
-      - env:
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            exit 0
+          fi
+          # 0-45分钟随机延迟
+          WAIT_SEC=$((RANDOM % 2700))
+          echo "错峰执行，休眠 $WAIT_SEC 秒..."
+          sleep $WAIT_SEC
+
+      - name: Run Script
+        env:
           GITHUB_REPO_NAME: ${{ github.repository }}
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
